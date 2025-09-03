@@ -6,6 +6,19 @@ import { loadCommandClasses } from './core/CommandRegistry.js';
 import { Config } from './config.js';
 import * as http from 'node:http';
 
+// --- Tiny HTTP server so Render Web Service has a port to health check ---
+function startHttpServer() {
+  const port = Number(process.env.PORT || 3000);
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('OK');
+  });
+  server.listen(port, () => {
+    console.log(`[web] listening on :${port}`);
+  });
+}
+
+// --- Optional: auto-register slash commands once on boot ---
 async function tryAutoRegisterOnBoot() {
   if (process.env.REGISTER_ON_BOOT !== 'true') return;
 
@@ -33,19 +46,8 @@ async function tryAutoRegisterOnBoot() {
   }
 }
 
-function startHttpServer() {
-  const port = Number(process.env.PORT || 3000);
-  const server = http.createServer((_req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('OK');
-  });
-  server.listen(port, () => {
-    console.log(`[web] listening on :${port}`);
-  });
-}
-
 async function main() {
-  // Start the tiny HTTP server so Render Web Service stays healthy
+  // Start HTTP server first so Render detects the port quickly
   startHttpServer();
 
   const client = new Bot();
@@ -75,10 +77,10 @@ async function main() {
   console.log(`[boot] Loaded ${count} command(s).`);
   await registerEvents(client);
 
-  // Optional one-shot slash-command registration
+  // Optional one-shot registration
   await tryAutoRegisterOnBoot();
 
-  // Login (do not log the returned token)
+  // Login (do not log the token)
   await client.login(Config.token);
 }
 
