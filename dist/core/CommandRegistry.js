@@ -1,74 +1,111 @@
 // src/core/CommandRegistry.ts
-import { REST, Routes } from 'discord.js';
-import { Config } from '../config.js';
+import '../lib/env.js';
 import fs from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL, fileURLToPath } from 'node:url';
-function isCodeFile(file) {
-    // accept .ts and .js, but ignore .d.ts
-    return (file.endsWith('.ts') || file.endsWith('.js')) && !file.endsWith('.d.ts');
-}
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { REST } from '@discordjs/rest';
+import { Routes } from 'discord.js';
+import { Config } from '../config.js';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const commandsDir = path.resolve(__dirname, '..', 'commands');
 function walk(dir) {
+    return fs.readdirSync(dir).flatMap((name) => {
+        const p = path.join(dir, name);
+        return fs.statSync(p).isDirectory() ? walk(p) : [p];
+    });
+}
+export async function loadCommandClasses() {
+    if (!fs.existsSync(commandsDir)) {
+        throw new Error(`Commands directory not found: ${commandsDir}`);
+    }
+    const files = walk(commandsDir).filter((f) => {
+        const base = path.basename(f);
+        if (base.endsWith('.d.ts'))
+            return false;
+        const ext = path.extname(f).toLowerCase();
+        return ext === '.ts' || ext === '.js' || ext === '.mjs' || ext === '.cjs';
+    });
     const out = [];
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory())
-            out.push(...walk(full));
-        else if (entry.isFile() && isCodeFile(full))
-            out.push(full);
+    for (const file of files) {
+        const url = pathToFileURL(file).href;
+        const mod = await import(url);
+        if (!mod?.default)
+            continue;
+        const Cmd = mod.default;
+        const inst = new Cmd();
+        const name = String(inst?.data?.name ?? '').trim();
+        if (!name) {
+            console.warn(`[registry] Skipping file with no .data.name: ${file}`);
+            continue;
+        }
+        out.push({ name, file, instance: inst });
     }
     return out;
 }
-/**
- * Loads command classes from the compiled commands directory.
- * Works in dev (tsx) and prod (dist) because we resolve relative to this file.
- */
-export async function loadCommandClasses() {
-    const here = fileURLToPath(new URL('.', import.meta.url)); // e.g. .../src/core/ or .../dist/core/
-    const commandsDir = path.resolve(here, '..', 'commands'); // .../src/commands or .../dist/commands
-    if (!fs.existsSync(commandsDir)) {
-        console.warn(`[CommandRegistry] No commands dir at ${commandsDir}`);
-        return [];
+function printDuplicates(dupes) {
+    console.error('✖ Duplicate command names detected:');
+    for (const [name, files] of dupes.entries()) {
+        console.error(`  /${name}`);
+        for (const f of files)
+            console.error(`     - ${f}`);
     }
-    const files = walk(commandsDir);
-    const instances = [];
-    for (const file of files) {
-        const mod = await import(pathToFileURL(file).href);
-        const Ctor = mod.default;
-        if (!Ctor)
-            continue;
-        const instance = new Ctor();
-        // Basic sanity: must have a slash command builder with toJSON
-        const data = instance.data;
-        if (!data || typeof data.toJSON !== 'function')
-            continue;
-        instances.push(instance);
-    }
-    return instances;
+    console.error('→ Rename or remove duplicates so each slash command name is unique.');
 }
-/**
- * Registers slash commands globally or to a single guild if DEV_GUILD_ID is set.
- * Run via: `npm run register:commands`
- */
 export async function registerCommands() {
-    const commands = await loadCommandClasses();
+    const loaded = await loadCommandClasses();
+    // Detect duplicates by name
+    const byName = new Map();
+    for (const { name, file } of loaded) {
+        const arr = byName.get(name) ?? [];
+        arr.push(file);
+        byName.set(name, arr);
+    }
+    const dupes = new Map([...byName.entries()].filter(([, files]) => files.length > 1));
+    if (dupes.size) {
+        printDuplicates(dupes);
+        throw new Error('Duplicate slash command names — fix and rerun.');
+    }
+    // Prepare body
+    const body = loaded.map(({ instance }) => instance.data.toJSON());
     const rest = new REST({ version: '10' }).setToken(Config.token);
-    const payload = commands.map((c) => c.data.toJSON());
-    const guildId = process.env.DEV_GUILD_ID?.trim();
+    const guildId = process.env.DEV_GUILD_ID;
     const route = guildId
         ? Routes.applicationGuildCommands(Config.clientId, guildId)
         : Routes.applicationCommands(Config.clientId);
-    await rest.put(route, { body: payload });
-    console.log(`[CommandRegistry] Registered ${payload.length} command(s) ${guildId ? `to guild ${guildId}` : 'globally'}.`);
-    return { count: payload.length, scope: guildId ? 'guild' : 'global', guildId: guildId || null };
+    console.log(`[registry] Registering ${body.length} command(s) ${guildId ? `to guild ${guildId}` : 'globally'}…`);
+    await rest.put(route, { body });
+    console.log('[registry] Done.');
 }
-// CLI usage: `tsx src/core/CommandRegistry.ts register` or `node dist/core/CommandRegistry.js register`
-if (process.argv[1] && path.basename(process.argv[1]).toLowerCase().includes('commandregistry')) {
-    const action = process.argv[2] ?? 'register';
-    if (action === 'register') {
-        registerCommands().catch((err) => {
-            console.error(err);
-            process.exit(1);
-        });
+// Extra helper to CLEAR commands if you want a clean slate
+export async function clearCommands(scope = 'guild') {
+    const rest = new REST({ version: '10' }).setToken(Config.token);
+    if (scope === 'guild') {
+        const gid = process.env.DEV_GUILD_ID;
+        if (!gid)
+            throw new Error('DEV_GUILD_ID not set.');
+        await rest.put(Routes.applicationGuildCommands(Config.clientId, gid), { body: [] });
+        console.log(`[registry] Cleared guild commands for ${gid}.`);
     }
+    else {
+        await rest.put(Routes.applicationCommands(Config.clientId), { body: [] });
+        console.log(`[registry] Cleared GLOBAL commands.`);
+    }
+}
+// CLI usage:
+//   npm run register:commands
+//   tsx src/core/CommandRegistry.ts clear guild
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+    const sub = process.argv[2] ?? 'register';
+    (async () => {
+        if (sub === 'register')
+            await registerCommands();
+        else if (sub === 'clear')
+            await clearCommands(process.argv[3] ?? 'guild');
+        else
+            console.log('Usage: register | clear [guild|global]');
+    })().catch((err) => {
+        console.error(err);
+        process.exitCode = 1;
+    });
 }

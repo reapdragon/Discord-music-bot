@@ -1,108 +1,176 @@
 import SpotifyWebApi from 'spotify-web-api-node';
 import { BaseExtractor } from './BaseExtractor.js';
 import { Config } from '../../config.js';
-const spotify = new SpotifyWebApi({
-    clientId: Config.spotify.clientId,
-    clientSecret: Config.spotify.clientSecret,
-});
-async function ensureToken() {
-    const token = spotify.getAccessToken();
-    if (!token) {
-        const { body } = await spotify.clientCredentialsGrant();
-        spotify.setAccessToken(body.access_token);
-    }
-}
-function parseSpotifyId(query) {
+/**
+ * Minimal, type-safe-enough Spotify extractor that works in prod builds
+ * without @types/spotify-web-api-node. We avoid referencing SpotifyApi.* types.
+ */
+const MARKET = 'US';
+function isSpotifyUrl(input) {
     try {
-        if (/^spotify:/i.test(query)) {
-            // spotify:track:ID or spotify:playlist:ID or spotify:album:ID
-            const [, type, id] = query.split(':');
-            if (type && id)
-                return { type: type, id };
-            return { type: null, id: null };
-        }
-        const url = new URL(query);
-        if (!/open\.spotify\.com$/i.test(url.host))
-            return { type: null, id: null };
-        const parts = url.pathname.split('/').filter(Boolean); // ['track','id']
-        const type = (parts[0] ?? '');
-        const id = parts[1] ?? null;
-        return { type: ['track', 'playlist', 'album'].includes(type) ? type : null, id };
+        if (input.startsWith('spotify:'))
+            return true;
+        const u = new URL(input);
+        return /(^|\.)spotify\.com$/i.test(u.hostname);
     }
     catch {
-        return { type: null, id: null };
+        return false;
     }
 }
+function parseSpotifyId(input) {
+    // Handle "spotify:<type>:<id>" URIs
+    if (input.startsWith('spotify:')) {
+        const parts = input.split(':'); // spotify:track:<id>
+        const kind = parts[1];
+        const id = parts[2] ?? null;
+        if (id && (kind === 'track' || kind === 'playlist' || kind === 'album' || kind === 'artist')) {
+            return { kind, id };
+        }
+        return { kind: null, id: null };
+    }
+    // Handle https://open.spotify.com/<type>/<id>
+    try {
+        const u = new URL(input);
+        const [, kind, id] = u.pathname.split('/'); // ["", "track", "<id>"]
+        if (id && (kind === 'track' || kind === 'playlist' || kind === 'album' || kind === 'artist')) {
+            // Strip any extra suffix like "?si=..."
+            return { kind: kind, id: id.split('?')[0] };
+        }
+    }
+    catch { /* ignore */ }
+    return { kind: null, id: null };
+}
+function trackToMeta(t) {
+    if (!t)
+        return null;
+    const title = t.name;
+    const url = t.external_urls?.spotify;
+    const durationMs = typeof t.duration_ms === 'number' ? t.duration_ms : undefined;
+    const artists = Array.isArray(t.artists) ? t.artists.map((a) => a.name).join(', ') : undefined;
+    const thumb = Array.isArray(t.album?.images) && t.album.images.length > 0
+        ? t.album.images[0].url
+        : undefined;
+    if (!title || !url)
+        return null;
+    return {
+        title,
+        url,
+        durationMs,
+        author: artists,
+        thumbnail: thumb,
+        source: 'SPOTIFY',
+    };
+}
 export class SpotifyExtractor extends BaseExtractor {
+    api = null;
+    tokenExpiresAt = 0;
     match(query) {
-        return /open\.spotify\.com/i.test(query) || /^spotify:(track|playlist|album):/i.test(query);
+        return isSpotifyUrl(query);
+    }
+    async ensureClient() {
+        if (!this.api) {
+            this.api = new SpotifyWebApi({
+                clientId: Config.spotify.clientId,
+                clientSecret: Config.spotify.clientSecret,
+            });
+        }
+        // Refresh client-credentials token if missing/expired
+        const now = Date.now();
+        if (now >= this.tokenExpiresAt) {
+            if (!Config.spotify.clientId || !Config.spotify.clientSecret) {
+                throw new Error('Spotify credentials missing (set SPOTIFY_CLIENT_ID/SECRET).');
+            }
+            const data = await this.api.clientCredentialsGrant();
+            const accessToken = data?.body?.access_token ?? data?.access_token;
+            const expiresIn = (data?.body?.expires_in ?? data?.expires_in ?? 3600);
+            if (!accessToken)
+                throw new Error('Failed to get Spotify access token.');
+            this.api.setAccessToken(accessToken);
+            this.tokenExpiresAt = now + (expiresIn - 30) * 1000; // refresh a bit early
+        }
+        return this.api;
     }
     async resolve(query) {
-        await ensureToken();
-        const { type, id } = parseSpotifyId(query);
-        if (!type || !id)
+        const { kind, id } = parseSpotifyId(query);
+        if (!kind || !id)
             return [];
-        if (type === 'track') {
-            const { body: t } = await spotify.getTrack(id);
-            return [{
-                    title: t.name,
-                    url: `https://open.spotify.com/track/${t.id}`,
-                    durationMs: t.duration_ms,
-                    author: t.artists.map(a => a.name).join(', '),
-                    thumbnail: t.album.images?.[0]?.url,
-                    source: 'SPOTIFY'
-                }];
-        }
-        if (type === 'playlist') {
-            // Page through playlist tracks
-            const out = [];
-            let offset = 0;
-            const limit = 100;
-            while (true) {
-                const { body: p } = await spotify.getPlaylistTracks(id, { offset, limit });
-                for (const item of p.items) {
-                    const t = item.track;
-                    if (!t)
-                        continue;
-                    out.push({
-                        title: t.name,
-                        url: `https://open.spotify.com/track/${t.id}`,
-                        durationMs: t.duration_ms,
-                        author: t.artists.map(a => a.name).join(', '),
-                        thumbnail: t.album.images?.[0]?.url,
-                        source: 'SPOTIFY'
-                    });
-                }
-                if (p.items.length < limit)
-                    break;
-                offset += limit;
+        const api = await this.ensureClient();
+        switch (kind) {
+            case 'track': {
+                const res = await api.getTrack(id);
+                const meta = trackToMeta(res?.body ?? res);
+                return meta ? [meta] : [];
             }
-            return out;
-        }
-        if (type === 'album') {
-            // Fetch album tracks (paged)
-            const out = [];
-            let offset = 0;
-            const limit = 50;
-            const { body: album } = await spotify.getAlbum(id);
-            while (true) {
-                const { body: tr } = await spotify.getAlbumTracks(id, { limit, offset });
-                for (const t of tr.items) {
-                    out.push({
-                        title: t.name,
-                        url: `https://open.spotify.com/track/${t.id}`,
-                        durationMs: t.duration_ms,
-                        author: t.artists.map(a => a.name).join(', '),
-                        thumbnail: album.images?.[0]?.url,
-                        source: 'SPOTIFY'
-                    });
+            case 'playlist': {
+                // Paginate playlist tracks (100 per request)
+                const out = [];
+                let offset = 0;
+                const limit = 100;
+                // Some SDK versions expose res.body, others just res; normalize with ??
+                for (;;) {
+                    const res = await api.getPlaylistTracks(id, { offset, limit, market: MARKET });
+                    const items = res?.body?.items ??
+                        res?.items ??
+                        [];
+                    for (const it of items) {
+                        const t = it?.track;
+                        const meta = trackToMeta(t);
+                        if (meta)
+                            out.push(meta);
+                    }
+                    const total = res?.body?.total ?? res?.total ?? out.length;
+                    offset += items.length;
+                    if (offset >= total || items.length === 0)
+                        break;
                 }
-                if (tr.items.length < limit)
-                    break;
-                offset += limit;
+                return out;
             }
-            return out;
+            case 'album': {
+                // Get all album tracks; we also fetch album once for images
+                const album = await api.getAlbum(id, { market: MARKET });
+                const albumBody = album?.body ?? album;
+                const images = albumBody?.images ?? [];
+                const defaultThumb = images.length ? images[0]?.url : undefined;
+                const out = [];
+                let offset = 0;
+                const limit = 50;
+                for (;;) {
+                    const res = await api.getAlbumTracks(id, { offset, limit, market: MARKET });
+                    const items = res?.body?.items ??
+                        res?.items ??
+                        [];
+                    for (const t of items) {
+                        const meta = trackToMeta({ ...t, album: { images } });
+                        if (meta)
+                            out.push(meta);
+                    }
+                    const total = res?.body?.total ?? res?.total ?? out.length;
+                    offset += items.length;
+                    if (offset >= total || items.length === 0)
+                        break;
+                }
+                // Fill thumbnails if missing
+                if (defaultThumb) {
+                    for (const m of out)
+                        if (!m.thumbnail)
+                            m.thumbnail = defaultThumb;
+                }
+                return out;
+            }
+            case 'artist': {
+                // Use top tracks for the artist in a market
+                const res = await api.getArtistTopTracks(id, MARKET);
+                const tracks = res?.body?.tracks ?? res?.tracks ?? [];
+                const out = [];
+                for (const t of tracks) {
+                    const meta = trackToMeta(t);
+                    if (meta)
+                        out.push(meta);
+                }
+                return out;
+            }
+            default:
+                return [];
         }
-        return [];
     }
 }
