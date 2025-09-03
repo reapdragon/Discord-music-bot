@@ -6,7 +6,7 @@ import { loadCommandClasses } from './core/CommandRegistry.js';
 import { Config } from './config.js';
 import * as http from 'node:http';
 
-// --- Tiny HTTP server so Render Web Service has a port to health check ---
+// --- keep Web Service alive on Render ---
 function startHttpServer() {
   const port = Number(process.env.PORT || 3000);
   const server = http.createServer((_req, res) => {
@@ -18,7 +18,7 @@ function startHttpServer() {
   });
 }
 
-// --- Optional: auto-register slash commands once on boot ---
+// --- optional: one-shot command registration on boot ---
 async function tryAutoRegisterOnBoot() {
   if (process.env.REGISTER_ON_BOOT !== 'true') return;
 
@@ -47,25 +47,22 @@ async function tryAutoRegisterOnBoot() {
 }
 
 async function main() {
-  // Start HTTP server first so Render detects the port quickly
+  // start HTTP first so Render detects a port
   startHttpServer();
 
   const client = new Bot();
 
-  // Load commands (supports either shape: instances[] OR { file, instance, name }[])
+  // load slash commands
   const loaded: any[] = await loadCommandClasses();
-
   let count = 0;
   for (const entry of loaded) {
     const file = entry?.file ?? '<unknown>';
-    const cmd = entry?.instance ?? entry; // handle both shapes
+    const cmd = entry?.instance ?? entry;
     const name = cmd?.data?.name;
-
     if (!name) {
       console.warn(`[boot] Skipping command with no .data.name (${file})`);
       continue;
     }
-
     try {
       client.commands.set(name, cmd);
       count++;
@@ -73,25 +70,16 @@ async function main() {
       console.warn(`[boot] Failed to load command "${name}" from ${file}:`, err);
     }
   }
-
   console.log(`[boot] Loaded ${count} command(s).`);
-  await registerEvents(client);
 
-  // Optional one-shot registration
+  await registerEvents(client);
   await tryAutoRegisterOnBoot();
 
-  // Login (do not log the token)
+  // login (don’t log the returned token string)
   await client.login(Config.token);
 }
 
-// Global safety nets
-process.on('unhandledRejection', (reason) => {
-  console.error('[process] Unhandled Rejection:', reason);
-});
-process.on('uncaughtException', (err) => {
-  console.error('[process] Uncaught Exception:', err);
-});
+process.on('unhandledRejection', (r) => console.error('[process] Unhandled Rejection:', r));
+process.on('uncaughtException', (e) => console.error('[process] Uncaught Exception:', e));
 
-main().catch((err) => {
-  console.error('[boot] fatal:', err);
-});
+main().catch((err) => console.error('[boot] fatal:', err));
