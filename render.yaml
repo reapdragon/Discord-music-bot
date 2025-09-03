@@ -2,7 +2,7 @@ services:
   - type: web
     name: discord-music-bot
     runtime: node
-    region: frankfurt        # or oregon / virginia / singapore / etc
+    region: frankfurt
     plan: free
     buildCommand: npm ci && npm run build
     startCommand: npm start
@@ -25,3 +25,6 @@ services:
         sync: false
       - key: REGISTER_ON_BOOT
         sync: false
+      # suppress ytdl's “update check” 403 in Render logs
+      - key: YTDL_NO_UPDATE
+        value: "1"

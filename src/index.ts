@@ -1,4 +1,3 @@
-// src/index.ts
 import './lib/env.js';
 import { Bot } from './core/Bot.js';
 import { registerEvents } from './core/EventRegistry.js';
@@ -6,7 +5,7 @@ import { loadCommandClasses } from './core/CommandRegistry.js';
 import { Config } from './config.js';
 import * as http from 'node:http';
 
-// --- keep Web Service alive on Render ---
+// --- tiny HTTP server so Render sees an open port & keeps us alive ---
 function startHttpServer() {
   const port = Number(process.env.PORT || 3000);
   const server = http.createServer((_req, res) => {
@@ -18,7 +17,7 @@ function startHttpServer() {
   });
 }
 
-// --- optional: one-shot command registration on boot ---
+// --- optional: one-shot slash command registration on boot ---
 async function tryAutoRegisterOnBoot() {
   if (process.env.REGISTER_ON_BOOT !== 'true') return;
 
@@ -47,12 +46,12 @@ async function tryAutoRegisterOnBoot() {
 }
 
 async function main() {
-  // start HTTP first so Render detects a port
+  // Start HTTP first so Render detects a port quickly
   startHttpServer();
 
   const client = new Bot();
 
-  // load slash commands
+  // Load commands
   const loaded: any[] = await loadCommandClasses();
   let count = 0;
   for (const entry of loaded) {
@@ -75,11 +74,18 @@ async function main() {
   await registerEvents(client);
   await tryAutoRegisterOnBoot();
 
-  // login (don’t log the returned token string)
+  // Login (don’t log the returned token)
   await client.login(Config.token);
 }
 
-process.on('unhandledRejection', (r) => console.error('[process] Unhandled Rejection:', r));
-process.on('uncaughtException', (e) => console.error('[process] Uncaught Exception:', e));
+// Global safety nets
+process.on('unhandledRejection', (reason) => {
+  console.error('[process] Unhandled Rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[process] Uncaught Exception:', err);
+});
 
-main().catch((err) => console.error('[boot] fatal:', err));
+main().catch((err) => {
+  console.error('[boot] fatal:', err);
+});
