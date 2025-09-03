@@ -15,8 +15,6 @@ services:
         sync: false
       - key: DISCORD_CLIENT_ID
         sync: false
-      - key: DEV_GUILD_ID
-        sync: false
       - key: SPOTIFY_CLIENT_ID
         sync: false
       - key: SPOTIFY_CLIENT_SECRET
@@ -24,6 +22,8 @@ services:
       - key: YOUTUBE_API_KEY
         sync: false
       - key: REGISTER_ON_BOOT
+        sync: false
+      - key: PORT
         sync: false
       # suppress ytdl's “update check” 403 in Render logs
       - key: YTDL_NO_UPDATE
