@@ -1,0 +1,25 @@
+services:
+  - type: worker
+    name: discord-music-bot
+    runtime: node           # <-- required (was "env: node")
+    region: frankfurt       # or oregon / singapore / etc
+    plan: starter
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: DISCORD_CLIENT_ID
+        sync: false
+      - key: DEV_GUILD_ID
+        sync: false
+      - key: SPOTIFY_CLIENT_ID
+        sync: false
+      - key: SPOTIFY_CLIENT_SECRET
+        sync: false
+      # Set to "true" once to auto-register, then unset
+      - key: REGISTER_ON_BOOT
+        sync: false
