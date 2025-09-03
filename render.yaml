@@ -1,12 +1,13 @@
 services:
-  - type: worker
+  - type: web
     name: discord-music-bot
     runtime: node
-    region: frankfurt            # or oregon / virginia / singapore / etc
-    plan: free                   # keep this to avoid billing prompt
+    region: frankfurt          # or: oregon, virginia, singapore, etc.
+    plan: free                 # free tier => no card required
     buildCommand: npm ci && npm run build
     startCommand: npm start
     autoDeploy: true
+    healthCheckPath: /         # we'll serve "OK" on /
     envVars:
       - key: NODE_ENV
         value: production
@@ -14,13 +15,13 @@ services:
         sync: false
       - key: DISCORD_CLIENT_ID
         sync: false
-      - key: DEV_GUILD_ID        # optional (per-guild registration for instant commands)
+      - key: DEV_GUILD_ID          # optional (per-guild slash commands)
         sync: false
-      - key: SPOTIFY_CLIENT_ID
+      - key: SPOTIFY_CLIENT_ID     # optional
         sync: false
-      - key: SPOTIFY_CLIENT_SECRET
+      - key: SPOTIFY_CLIENT_SECRET # optional
         sync: false
-      - key: YOUTUBE_API_KEY     # optional (not used by the extractors I gave you)
+      - key: YOUTUBE_API_KEY       # optional (not required by current extractor)
         sync: false
-      - key: REGISTER_ON_BOOT    # optional: set "true" once to auto-register, then unset
+      - key: REGISTER_ON_BOOT      # optional: set "true" once, then unset
         sync: false
