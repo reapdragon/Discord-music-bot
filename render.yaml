@@ -3,7 +3,7 @@ services:
     name: discord-music-bot
     runtime: node           # <-- required (was "env: node")
     region: frankfurt       # or oregon / singapore / etc
-    plan: starter
+    plan: free
     buildCommand: npm ci && npm run build
     startCommand: npm start
     autoDeploy: true
