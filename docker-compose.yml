@@ -1,20 +1,16 @@
-name: project-fishy   # avoids space in folder name becoming the project name
-
+name: projectfishy
 services:
   bot:
     build:
       context: .
-      target: prod
-    container_name: project-fishy-bot
-    restart: unless-stopped
+      dockerfile: Dockerfile
+    container_name: projectfishy-bot
     env_file:
       - .env
-    environment:
-      NODE_ENV: production
-      YTDL_NO_UPDATE: "1"
-      PORT: "8889"
-      # REGISTER_ON_BOOT: "true"   # (optional) run once then remove
+    # Map the optional health/metrics web port (can remove if unused)
     ports:
       - "8889:8889"
-    # On Linux you can uncomment for lowest-latency UDP:
-    # network_mode: "host"
+    # Persist cookies.txt (if using YTDL_COOKIES) and any future cache
+    volumes:
+      - ./data:/data
+    restart: unless-stopped

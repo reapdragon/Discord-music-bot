@@ -22,6 +22,8 @@ import type { Track } from './Track.js';
 
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
+const YT_COOKIE = (process.env.YOUTUBE_COOKIE ?? '').trim();
+const YT_ID_TOKEN = (process.env.YOUTUBE_IDENTITY_TOKEN ?? '').trim();
 
 type GuildSession = {
   player: AudioPlayer;
@@ -31,12 +33,9 @@ type GuildSession = {
 };
 
 export class Player {
-  /** one session per guild */
   private sessions = new Map<string, GuildSession>();
-  /** prevents double-starts while we’re building a resource */
   private starting = new Set<string>();
 
-  /** Create or return the session for a guild */
   private getOrCreateSession(guildId: string): GuildSession {
     let s = this.sessions.get(guildId);
     if (s) return s;
@@ -46,12 +45,10 @@ export class Player {
       behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
     });
 
-    // Log player state transitions clearly
-    player.on('stateChange', (oldS, newS) => {
-      console.log(`[audio] ${guildId}: ${oldS.status} -> ${newS.status}`);
+    player.on('stateChange', (o, n) => {
+      console.log(`[audio] ${guildId}: ${o.status} -> ${n.status}`);
     });
 
-    // When a track finishes, auto-advance
     player.on(AudioPlayerStatus.Idle, () => {
       const sess = this.sessions.get(guildId);
       if (!sess) return;
@@ -76,12 +73,12 @@ export class Player {
     return s;
   }
 
-  /** Join (or move to) a voice channel */
   async connect(member: GuildMember, channel?: VoiceBasedChannel): Promise<VoiceConnection> {
     const vc = channel ?? member.voice.channel;
     if (!vc) throw new Error('Join a voice channel first.');
 
     const s = this.getOrCreateSession(vc.guild.id);
+
     const conn = joinVoiceChannel({
       channelId: vc.id,
       guildId: vc.guild.id,
@@ -99,29 +96,20 @@ export class Player {
 
     s.connection = conn;
     conn.subscribe(s.player);
-
     return conn;
   }
 
-  /**
-   * Enqueue a track. If the player is not busy, begin playback immediately.
-   * Returns { started, position } for user feedback.
-   */
   enqueue(guildId: string, track: Track): { started: boolean; position: number } {
     const s = this.getOrCreateSession(guildId);
-
-    // queue it
     s.queue.enqueue(track);
     const position = Math.max(0, s.queue.length - 1);
 
-    // attempt to start if we’re idle
     const started = this.maybeStart(guildId);
 
     console.log('[queue] +', track.meta.title, `(pos ${position}${started ? ', started' : ''})`);
     return { started, position };
   }
 
-  /** If we’re idle (not playing/buffering/starting), start the next track */
   private maybeStart(guildId: string): boolean {
     const s = this.getOrCreateSession(guildId);
 
@@ -131,13 +119,11 @@ export class Player {
       status === AudioPlayerStatus.Buffering ||
       this.starting.has(guildId);
 
-    // if “busy”, do nothing — the idle handler will auto-advance later
     if (busy) {
       console.log('[maybeStart] busy=', { status, starting: this.starting.has(guildId) });
       return false;
     }
 
-    // if we have a current track but player is idle for some reason, replay it
     let next = s.current ?? undefined;
     if (!next) {
       next = s.queue.dequeue();
@@ -149,9 +135,9 @@ export class Player {
       return false;
     }
 
-    // start
     this.starting.add(guildId);
     console.log('[maybeStart] starting ->', next.meta.title);
+
     this.play(guildId, next)
       .catch((e) => console.error('[player] start failed:', e))
       .finally(() => this.starting.delete(guildId));
@@ -159,36 +145,41 @@ export class Player {
     return true;
   }
 
-  /** Play the given track now (must already be connected) */
   async play(guildId: string, track: Track): Promise<void> {
     const s = this.getOrCreateSession(guildId);
     if (!s.connection) throw new Error('Not connected to a voice channel.');
 
-    // Build resource (play-dl first, fallback to ytdl)
-    const { resource, cleanup } = await this.buildResource(track.meta.url);
+    try {
+      const { resource, cleanup } = await this.buildResource(track.meta.url);
+      s.player.play(resource);
+      s.current = track;
 
-    s.player.play(resource);
-    s.current = track;
-
-    // Clean stream resources when we exit this track
-    const onDone = () => {
-      try { cleanup?.(); } catch {}
-      s.player.off(AudioPlayerStatus.Idle, onDone);
-      s.player.off('error', onDone as any);
-    };
-
-    s.player.once(AudioPlayerStatus.Idle, onDone);
-    s.player.once('error', onDone as any);
+      const onDone = () => {
+        try { cleanup?.(); } catch {}
+        s.player.off(AudioPlayerStatus.Idle, onDone);
+        s.player.off('error', onDone as any);
+      };
+      s.player.once(AudioPlayerStatus.Idle, onDone);
+      s.player.once('error', onDone as any);
+    } catch (err: any) {
+      console.warn('[player] play failed for', track.meta.url, '-', err?.message ?? err);
+      s.current = null;
+      const next = s.queue.dequeue();
+      if (next) {
+        console.log('[player] skipping blocked track -> trying next:', next.meta.title);
+        this.maybeStart(guildId);
+      } else {
+        console.log('[player] no playable items left');
+      }
+    }
   }
 
-  /** Skip current track (if any). Triggers idle → auto-next. */
   skip(guildId: string): void {
     const s = this.sessions.get(guildId);
     if (!s) return;
     s.player.stop(true);
   }
 
-  /** Stop playback and clear queue. */
   stop(guildId: string): void {
     const s = this.sessions.get(guildId);
     if (!s) return;
@@ -197,7 +188,6 @@ export class Player {
     s.player.stop(true);
   }
 
-  /** Ensure we’re connected before trying to play/enqueue */
   async ensureConnected(member: GuildMember, channel?: VoiceBasedChannel): Promise<void> {
     const gid = (channel ?? member.voice.channel)?.guild.id;
     if (!gid) throw new Error('Join a voice channel first.');
@@ -205,12 +195,11 @@ export class Player {
     if (!s || !s.connection) await this.connect(member, channel);
   }
 
-  /** Create an audio resource using play-dl or ytdl-core as fallback */
   private async buildResource(url: string): Promise<{
     resource: ReturnType<typeof createAudioResource>;
     cleanup: () => void;
   }> {
-    // prefer play-dl (handles rate-limit/retries better)
+    // 1) Try play-dl first (uses cookie set in initYouTubeTokens)
     try {
       const pl = await playdl.stream(url);
       const { stream: probed, type } = await demuxProbe(pl.stream);
@@ -223,14 +212,19 @@ export class Player {
       console.warn('[player] play-dl failed, falling back to ytdl:', (e as Error)?.message ?? e);
     }
 
-    // fallback to ytdl-core
+    // 2) Fallback: ytdl-core with cookie + UA (+ optional identity token)
+    const headers: Record<string, string> = {
+      'user-agent': UA,
+      'accept-language': 'en-US,en;q=0.9',
+    };
+    if (YT_COOKIE) headers.cookie = YT_COOKIE;
+    if (YT_ID_TOKEN) headers['x-youtube-identity-token'] = YT_ID_TOKEN;
+
     const ystream = ytdl(url, {
       filter: 'audioonly',
       quality: 'highestaudio',
       highWaterMark: 1 << 25,
-      requestOptions: {
-        headers: { 'user-agent': UA, 'accept-language': 'en-US,en;q=0.9' },
-      },
+      requestOptions: { headers },
     });
 
     const { stream: probed, type } = await demuxProbe(ystream);

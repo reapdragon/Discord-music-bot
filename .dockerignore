@@ -1,11 +1,9 @@
 node_modules
+npm-debug.log
 dist
 .git
-.git/*
-.vscode
-.DS_Store
-*.log
-.env
-npm-debug.log*
-yarn.lock
-pnpm-lock.yaml
+.gitignore
+Dockerfile
+docker-compose.yml
+data/*.mp3
+data/*.wav
