@@ -2,7 +2,20 @@
 import 'dotenv/config';
 import * as playdl from 'play-dl';
 import { Bot } from './core/Bot.js';
+import { Client, GatewayIntentBits, Partials } from 'discord.js';
+// ... your other imports
 
+export const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildVoiceStates,   // << REQUIRED for voice
+    // (optional) GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent,
+  ],
+  partials: [Partials.Channel],
+});
+
+// ...rest of your boot code
+  
 async function boot() {
   // YouTube cookie (prevents “confirm you’re not a bot”)
   const ytCookie = process.env.YOUTUBE_COOKIE?.trim();
