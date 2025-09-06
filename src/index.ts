@@ -1,45 +1,31 @@
-import './lib/env.js';
-import { initYouTubeTokens } from './lib/ytTokens.js';
+// src/index.ts
+import 'dotenv/config';
+import * as playdl from 'play-dl';
 import { Bot } from './core/Bot.js';
-import { registerEvents } from './core/EventRegistry.js';
-import { loadCommandClasses } from './core/CommandRegistry.js';
-import { Config } from './config.js';
 
-async function main() {
-  // Configure play-dl with cookie before anything touches YouTube
-  await initYouTubeTokens();
-
-  const client = new Bot();
-
-  // Load commands (supports either shape: instances[] OR { file, instance, name }[])
-  const loaded: any[] = await loadCommandClasses();
-
-  let count = 0;
-  for (const entry of loaded) {
-    const file = entry?.file ?? '<unknown>';
-    const cmd = entry?.instance ?? entry; // handle both shapes
-    const name = cmd?.data?.name;
-
-    if (!name) {
-      console.warn(`[boot] Skipping command with no .data.name (${file})`);
-      continue;
-    }
-
-    try {
-      client.commands.set(name, cmd);
-      count++;
-    } catch (err) {
-      console.warn(`[boot] Failed to load command "${name}" from ${file}:`, err);
-    }
+async function boot() {
+  // YouTube cookie (prevents “confirm you’re not a bot”)
+  const ytCookie = process.env.YOUTUBE_COOKIE?.trim();
+  if (ytCookie) {
+    await playdl.setToken({ youtube: { cookie: ytCookie } });
+    console.log('[yt] Using YOUTUBE_COOKIE session.');
+  } else {
+    console.warn('[yt] No YOUTUBE_COOKIE set — YouTube may block requests with “confirm you’re not a bot”.');
   }
 
-  console.log(`[boot] Loaded ${count} command(s).`);
-  await registerEvents(client);
+  // Optional: Spotify creds (improves resolving)
+  const spId = process.env.SPOTIFY_CLIENT_ID?.trim();
+  const spSecret = process.env.SPOTIFY_CLIENT_SECRET?.trim();
+  if (spId && spSecret) {
+    await playdl.setToken({ spotify: { client_id: spId, client_secret: spSecret, refresh_token: '', market: 'US' } });
+    console.log('[spotify] tokens set.');
+  }
 
-  const me = await client.login(Config.token);
-  console.log(`[ready] login ok, user id=${me}`);
+  const bot = new Bot();
+  await bot.login();
 }
 
-main().catch((err) => {
-  console.error('[boot] fatal:', err);
+boot().catch((e) => {
+  console.error('[boot] fatal:', e);
+  process.exit(1);
 });

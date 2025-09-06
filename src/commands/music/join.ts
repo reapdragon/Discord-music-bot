@@ -1,48 +1,33 @@
-import { SlashCommandBuilder } from 'discord.js';
+import { SlashCommandBuilder, GuildMember } from 'discord.js';
 import { Command, CommandContext } from '../../core/Command.js';
 import { player } from '../../music/Player.js';
+import { safeDefer } from '../utils/safeReply.js';
 
 export default class Join extends Command {
   public data = new SlashCommandBuilder()
     .setName('join')
-    .setDescription('Make the bot join your current voice channel');
+    .setDescription('Have the bot join your current voice channel');
 
   async execute({ interaction }: CommandContext): Promise<void> {
-  if (!interaction.inGuild()) {
-    await interaction.reply({ content: 'Use this in a server.', ephemeral: true });
-    return;
-  }
+    await safeDefer(interaction);
 
-  await interaction.deferReply({ ephemeral: true });
+    if (!interaction.guild) {
+      await interaction.editReply('Use this in a server.');
+      return;
+    }
 
-  try {
-    const guild = interaction.guild!;
-    const member = await guild.members.fetch(interaction.user.id);
-    const channel = member.voice.channel;
-
-    if (!channel) {
+    const member = await interaction.guild.members.fetch(interaction.user.id) as GuildMember;
+    if (!member.voice.channel) {
       await interaction.editReply('Join a voice channel first.');
       return;
     }
 
-    // Ensure the bot can actually join/speak there
-    const me = await guild.members.fetchMe();
-    const perms = channel.permissionsFor(me);
-    if (!perms?.has('Connect') || !perms?.has('Speak')) {
-      await interaction.editReply('I need **Connect** and **Speak** permissions in that channel.');
-      return;
-    }
-
-    await player.ensureConnected(member);
-    await interaction.editReply(`✅ Joined **${channel.name}**`);
-  } catch (err) {
-    console.error('[join] error:', err);
-    if (interaction.deferred || interaction.replied) {
-      await interaction.editReply('Failed to join voice channel.');
-    } else {
-      await interaction.reply({ content: 'Failed to join voice channel.', ephemeral: true });
+    try {
+      await player.ensureConnected(member);
+      await interaction.editReply(`✅ Joined **${member.voice.channel.name}**`);
+    } catch (e) {
+      console.error('[join] failed:', e);
+      await interaction.editReply('Failed to join your voice channel.');
     }
   }
-}
-
 }

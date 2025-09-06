@@ -1,3 +1,4 @@
+// src/music/Player.ts
 import {
   AudioPlayer,
   AudioPlayerStatus,
@@ -13,10 +14,8 @@ import {
   type DiscordGatewayAdapterCreator,
 } from '@discordjs/voice';
 import type { GuildMember, VoiceBasedChannel } from 'discord.js';
-
 import * as playdl from 'play-dl';
 import ytdl from '@distube/ytdl-core';
-
 import { Queue } from './Queue.js';
 import type { Track } from './Track.js';
 
@@ -31,7 +30,7 @@ type GuildSession = {
 };
 
 export class Player {
-  private sessions = new Map<string, GuildSession>();
+  public sessions = new Map<string, GuildSession>(); // made public so commands can read queue safely
   private starting = new Set<string>();
 
   private getOrCreateSession(guildId: string): GuildSession {
@@ -43,7 +42,6 @@ export class Player {
       behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
     });
 
-    // Auto-next
     player.on(AudioPlayerStatus.Idle, () => {
       const s = this.sessions.get(guildId);
       if (!s) return;
@@ -63,15 +61,15 @@ export class Player {
     return session;
   }
 
-  /** Join (or rejoin) a voice channel now. */
   async connect(member: GuildMember, channel?: VoiceBasedChannel): Promise<VoiceConnection> {
-    const vc = channel ?? member.voice.channel;
+    const vc = channel ?? (member.voice?.channel as VoiceBasedChannel | null);
     if (!vc) throw new Error('Join a voice channel first.');
 
     const s = this.getOrCreateSession(vc.guild.id);
 
-    // If we already have a connection but it's destroyed, forget it.
-    if (s.connection?.state.status === VoiceConnectionStatus.Destroyed) {
+    // if an old connection exists but is bad, destroy it
+    if (s.connection && [VoiceConnectionStatus.Destroyed].includes(s.connection.state.status)) {
+      try { s.connection.destroy(); } catch {}
       s.connection = null;
     }
 
@@ -82,8 +80,13 @@ export class Player {
       selfDeaf: true,
     });
 
-    // Attach robust lifecycle handlers once.
-    this.attachConnHandlers(vc.guild.id, conn);
+    conn.on('stateChange', (oldS, newS) => {
+      console.log(`[voice] ${vc.guild.id}: ${oldS.status} -> ${newS.status}`);
+      // if disconnected/destroyed, drop reference so ensureConnected will rejoin next time
+      if (newS.status === VoiceConnectionStatus.Destroyed) {
+        s.connection = null;
+      }
+    });
 
     await entersState(conn, VoiceConnectionStatus.Ready, 20_000);
     s.connection = conn;
@@ -91,33 +94,6 @@ export class Player {
     return conn;
   }
 
-  /** Ensures we are in a READY state. Reconnects if the saved connection is stale. */
-  async ensureConnected(member: GuildMember, channel?: VoiceBasedChannel): Promise<void> {
-    const gid = (channel ?? member.voice.channel)?.guild.id;
-    if (!gid) throw new Error('Join a voice channel first.');
-    const s = this.sessions.get(gid);
-
-    if (!s?.connection) {
-      await this.connect(member, channel);
-      return;
-    }
-
-    const status = s.connection.state.status;
-    if (status === VoiceConnectionStatus.Ready) return;
-
-    try {
-      await entersState(s.connection, VoiceConnectionStatus.Ready, 5_000);
-    } catch {
-      // Connection is not recoverable -> reconnect
-      try {
-        s.connection.destroy();
-      } catch {}
-      s.connection = null;
-      await this.connect(member, channel);
-    }
-  }
-
-  /** Enqueue a track. If idle, start immediately. */
   enqueue(guildId: string, track: Track): { started: boolean; position: number } {
     const s = this.getOrCreateSession(guildId);
 
@@ -143,12 +119,17 @@ export class Player {
     return { started: false, position: queuedPos };
   }
 
-  /** Play a specific track now (connection must already exist and be Ready). */
+  /** Play a specific track now (connection must already exist). */
   async play(guildId: string, track: Track): Promise<void> {
     const s = this.getOrCreateSession(guildId);
     if (!s.connection) throw new Error('Not connected to a voice channel.');
-    if (s.connection.state.status !== VoiceConnectionStatus.Ready) {
-      await entersState(s.connection, VoiceConnectionStatus.Ready, 10_000);
+
+    // Make sure we're actually ready (covers stale refs after /stop)
+    try {
+      await entersState(s.connection, VoiceConnectionStatus.Ready, 5_000);
+    } catch {
+      s.connection = null;
+      throw new Error('Voice connection not ready; try /join and /play again.');
     }
 
     const { resource, cleanup } = await this.buildResource(track.meta.url);
@@ -164,73 +145,50 @@ export class Player {
     s.player.once('error', once as any);
   }
 
-  /** Skip current track (triggers Idle -> next). */
   skip(guildId: string): void {
     const s = this.sessions.get(guildId);
     if (!s) return;
     s.player.stop(true);
   }
 
-  /** Stop + clear queue + fully leave voice. */
-  leave(guildId: string): void {
+  stop(guildId: string): void {
     const s = this.sessions.get(guildId);
     if (!s) return;
-
     s.queue.clear();
     s.current = null;
-
+    try { s.player.stop(true); } catch {}
     try {
-      s.player.stop(true);
+      if (s.connection) {
+        s.connection.destroy();
+      }
     } catch {}
-
-    if (s.connection) {
-      try { s.connection.destroy(); } catch {}
-      s.connection = null;
-    }
+    s.connection = null;
   }
 
-  // ---------- internals ----------
-
-  private attachConnHandlers(guildId: string, conn: VoiceConnection) {
-    // Avoid attaching handlers multiple times
-    // @ts-ignore private symbol guard
-    if ((conn as any).__pf_handlers_attached) return;
-    // @ts-ignore
-    (conn as any).__pf_handlers_attached = true;
-
-    conn.on('stateChange', (oldS, newS) => {
-      console.log(`[voice] ${guildId}: ${oldS.status} -> ${newS.status}`);
-    });
-
-    conn.on(VoiceConnectionStatus.Disconnected, async () => {
-      const s = this.sessions.get(guildId);
-      if (!s) return;
-
+  async ensureConnected(member: GuildMember, channel?: VoiceBasedChannel): Promise<void> {
+    const vc = channel ?? (member.voice?.channel as VoiceBasedChannel | null);
+    if (!vc) throw new Error('Join a voice channel first.');
+    const gid = vc.guild.id;
+    const s = this.sessions.get(gid);
+    const needsJoin =
+      !s?.connection ||
+      [VoiceConnectionStatus.Destroyed, VoiceConnectionStatus.Disconnected].includes(s.connection.state.status);
+    if (needsJoin) {
+      await this.connect(member, channel);
+    } else {
       try {
-        await Promise.race([
-          entersState(conn, VoiceConnectionStatus.Signalling, 5_000),
-          entersState(conn, VoiceConnectionStatus.Connecting, 5_000),
-        ]);
-        // recovered
+        await entersState(s!.connection!, VoiceConnectionStatus.Ready, 5_000);
       } catch {
-        // Not recoverable, destroy
-        try { conn.destroy(); } catch {}
-        if (s.connection === conn) s.connection = null;
+        await this.connect(member, channel);
       }
-    });
-
-    conn.on(VoiceConnectionStatus.Destroyed, () => {
-      const s = this.sessions.get(guildId);
-      if (!s) return;
-      if (s.connection === conn) s.connection = null;
-    });
+    }
   }
 
   private async buildResource(url: string): Promise<{
     resource: ReturnType<typeof createAudioResource>;
     cleanup: () => void;
   }> {
-    // try play-dl first
+    // 1) try play-dl (uses cookie set in index.ts, if any)
     try {
       const pl = await playdl.stream(url);
       const { stream: probed, type } = await demuxProbe(pl.stream);
@@ -241,13 +199,21 @@ export class Player {
       console.warn('[player] play-dl failed, falling back to ytdl:', (e as Error)?.message ?? e);
     }
 
-    // fallback ytdl
+    // 2) fallback to ytdl with cookie + headers
+    const cookie = process.env.YOUTUBE_COOKIE?.trim();
     const ystream = ytdl(url, {
       filter: 'audioonly',
       quality: 'highestaudio',
       highWaterMark: 1 << 25,
-      requestOptions: { headers: { 'user-agent': UA, 'accept-language': 'en-US,en;q=0.9' } },
+      requestOptions: {
+        headers: {
+          'user-agent': UA,
+          'accept-language': 'en-US,en;q=0.9',
+          ...(cookie ? { cookie } : {}),
+        },
+      },
     });
+
     const { stream: probed, type } = await demuxProbe(ystream);
     const resource = createAudioResource(probed, { inputType: type ?? StreamType.Arbitrary });
     const cleanup = () => { try { (ystream as any)?.destroy?.(); } catch {} };

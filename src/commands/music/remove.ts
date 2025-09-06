@@ -1,33 +1,35 @@
 import { SlashCommandBuilder } from 'discord.js';
 import { Command, CommandContext } from '../../core/Command.js';
 import { player } from '../../music/Player.js';
+import { safeDefer } from '../utils/safeReply.js';
 
-export default class Remove extends Command {
+export default class Resume extends Command {
   public data = new SlashCommandBuilder()
-    .setName('remove')
-    .setDescription('Remove a track from the queue by its position (1-based)')
-    .addIntegerOption(opt =>
-      opt.setName('position').setDescription('Position in the queue (1 = next up)').setRequired(true)
-    );
+    .setName('resume')
+    .setDescription('Resume playback');
 
   async execute({ interaction }: CommandContext): Promise<void> {
-    const guildId = interaction.guildId;
+    await safeDefer(interaction);
+
+    const guildId = interaction.guild?.id;
     if (!guildId) {
-      await interaction.reply({ content: 'This command must be used in a server.', ephemeral: true });
+      await interaction.editReply('Use this in a server.');
       return;
     }
-    const pos = interaction.options.getInteger('position', true);
-    const session = (player as any).sessions?.get(guildId);
-    if (!session || !session.queue) {
-      await interaction.reply('Queue is empty.');
-      return;
+
+    try {
+      // Prefer your Player API if present
+      if (typeof (player as any).resume === 'function') {
+        await (player as any).resume(guildId);
+      } else {
+        const s: any = (player as any).sessions?.get(guildId);
+        if (!s?.player) throw new Error('Nothing to resume.');
+        s.player.unpause();
+      }
+      await interaction.editReply('▶️ Resumed.');
+    } catch (e) {
+      console.error('[resume] failed:', e);
+      await interaction.editReply('Failed to resume.');
     }
-    const idx = pos - 1;
-    if (idx < 0 || idx >= session.queue.tracks.length) {
-      await interaction.reply(`Invalid position. Queue has ${session.queue.tracks.length} item(s).`);
-      return;
-    }
-    const [removed] = session.queue.tracks.splice(idx, 1);
-    await interaction.reply(`🗑️ Removed **${removed.meta.title}** from the queue.`);
   }
 }
