@@ -1,9 +1,7 @@
+# Don’t send heavy/irrelevant stuff to the build context
 node_modules
-npm-debug.log
 dist
 .git
 .gitignore
-Dockerfile
-docker-compose.yml
-data/*.mp3
-data/*.wav
+npm-debug.log
+*.log
