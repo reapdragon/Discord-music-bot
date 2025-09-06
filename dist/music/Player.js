@@ -15,11 +15,31 @@ export class Player {
         player.on('stateChange', (oldS, newS) => {
             console.log(`[audio] ${guildId}: ${oldS.status} -> ${newS.status}`);
         });
+        // Robust error recovery: retry current track once or twice on network-y errors
         player.on('error', (e) => {
             console.error(`[audio:error] ${guildId}`, e);
             const sess = this.sessions.get(guildId);
             if (!sess)
                 return;
+            const shouldRetry = this.isRecoverableStreamError(e) && sess.current && sess.currentRetries < 2;
+            if (shouldRetry) {
+                sess.currentRetries += 1;
+                console.warn(`[player] recoverable error — retrying current (attempt ${sess.currentRetries}/2)`);
+                sess.suppressIdleOnce = true; // ignore the idle that follows stop()
+                try {
+                    sess.cleanupCurrent?.();
+                }
+                catch { }
+                sess.cleanupCurrent = undefined;
+                // Stop the current player frame and restart same track from the top
+                try {
+                    sess.player.stop(true);
+                }
+                catch { }
+                this.playNow(guildId, sess.current).catch(err => console.error('[playNow:retry:error]', err));
+                return;
+            }
+            // No retry left or non-recoverable: go to next track
             const next = sess.queue.dequeue();
             if (next) {
                 sess.suppressIdleOnce = true;
@@ -51,6 +71,7 @@ export class Player {
             if (next) {
                 console.log('[player] idle -> next:', next.meta.title);
                 sess.current = next;
+                sess.currentRetries = 0;
                 this.playNow(guildId, next).catch((e) => console.error('[playNow:error]', e));
             }
             else {
@@ -58,7 +79,14 @@ export class Player {
                 sess.current = null;
             }
         });
-        s = { player, queue, connection: null, current: null, suppressIdleOnce: false };
+        s = {
+            player,
+            queue,
+            connection: null,
+            current: null,
+            suppressIdleOnce: false,
+            currentRetries: 0,
+        };
         this.sessions.set(guildId, s);
         return s;
     }
@@ -80,8 +108,19 @@ export class Player {
         });
         this.attachConnDebug(conn, vc.guild.id);
         console.log('[player] waiting for Voice Ready…');
-        await entersState(conn, VoiceConnectionStatus.Ready, 20_000);
-        console.log('[player] voice Ready');
+        try {
+            await entersState(conn, VoiceConnectionStatus.Ready, 20_000);
+            console.log('[player] voice Ready');
+        }
+        catch (e) {
+            try {
+                conn.destroy();
+            }
+            catch { }
+            const err = new Error('VOICE_CONNECT_TIMEOUT_UDP');
+            err.cause = e;
+            throw err;
+        }
         session.connection = conn;
         conn.subscribe(session.player);
         console.log('[player] subscribed player to connection');
@@ -97,15 +136,16 @@ export class Player {
     }
     enqueue(guildId, track) {
         const s = this.getOrCreateSession(guildId);
-        const somethingPlaying = s.player.state.status === AudioPlayerStatus.Playing ||
+        const busy = s.player.state.status === AudioPlayerStatus.Playing ||
             s.player.state.status === AudioPlayerStatus.Buffering ||
             !!s.current;
-        if (somethingPlaying) {
+        if (busy) {
             s.queue.enqueue(track);
             console.log('[queue] +', track.meta.title, '(pos', s.queue.tracks.length, ')');
             return { started: false, position: s.queue.tracks.length };
         }
         s.current = track;
+        s.currentRetries = 0;
         this.playNow(guildId, track).catch((e) => console.error('[playNow:error]', e));
         return { started: true, position: 0 };
     }
@@ -122,6 +162,7 @@ export class Player {
             catch { }
             s.cleanupCurrent = undefined;
             s.current = next;
+            s.currentRetries = 0;
             try {
                 s.player.stop(true);
             }
@@ -156,6 +197,7 @@ export class Player {
         catch { }
         s.cleanupCurrent = undefined;
         s.current = null;
+        s.currentRetries = 0;
         try {
             s.player.stop(true);
         }
@@ -169,8 +211,7 @@ export class Player {
         }
         return { action: 'stopped' };
     }
-    // ---------- Stream building (no ffmpeg on Render Free) ----------
-    // Prefer WebM/Opus to avoid transcoding
+    // ---------- Stream building (no ffmpeg) ----------
     async getWebmOpusStream(url) {
         const info = await ytdl.getInfo(url, {
             requestOptions: { headers: { 'user-agent': UA, 'accept-language': 'en-US,en;q=0.9' } },
@@ -188,7 +229,6 @@ export class Player {
             });
             return { type: 'webm/opus', stream };
         }
-        // Fallback: generic audioonly (may be m4a). We'll demuxProbe later.
         console.log('[ytdl] no opus/webm format; falling back to audioonly');
         const stream = ytdl(url, {
             filter: 'audioonly',
@@ -198,7 +238,6 @@ export class Player {
         });
         return { type: 'unknown', stream };
     }
-    // Retry/backoff for 429/503 around the whole build step
     async buildResource(url, attempt = 1) {
         try {
             const got = await this.getWebmOpusStream(url);
@@ -236,17 +275,19 @@ export class Player {
         if (!s.connection)
             throw new Error('Not connected to a voice channel.');
         console.log('[playNow] starting:', track.meta.title, track.meta.url);
+        s.currentRetries = 0; // reset on new start
         try {
             const { resource, cleanup } = await this.buildResource(track.meta.url);
             s.cleanupCurrent = cleanup;
             s.player.play(resource);
-            // If we never transition to Playing in 6s, assume stream failed silently
+            // Safety guard: if not "playing" within 6s, assume failure and try next
             setTimeout(() => {
                 if (s.player.state.status !== AudioPlayerStatus.Playing) {
                     console.warn('[playNow] not playing after 6s — attempting next track');
                     const next = s.queue.dequeue();
                     if (next) {
                         s.current = next;
+                        s.currentRetries = 0;
                         this.playNow(guildId, next).catch((err) => console.error('[playNow:next:error]', err));
                     }
                 }
@@ -257,12 +298,23 @@ export class Player {
             const next = s.queue.dequeue();
             if (next) {
                 s.current = next;
+                s.currentRetries = 0;
                 this.playNow(guildId, next).catch((err) => console.error('[playNow:next:error]', err));
             }
             else {
                 s.current = null;
             }
         }
+    }
+    isRecoverableStreamError(e) {
+        const msg = String(e?.message ?? '').toLowerCase();
+        const code = (e?.code ?? '').toString().toUpperCase();
+        const sc = e?.statusCode ?? e?.status ?? 0;
+        return (msg.includes('aborted') ||
+            code === 'ECONNRESET' ||
+            code === 'ETIMEDOUT' ||
+            sc === 429 ||
+            sc === 503);
     }
     getSession(guildId) {
         return this.sessions.get(guildId) ?? null;
