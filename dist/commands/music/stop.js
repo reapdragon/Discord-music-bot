@@ -4,31 +4,20 @@ import { player } from '../../music/Player.js';
 export default class Stop extends Command {
     data = new SlashCommandBuilder()
         .setName('stop')
-        .setDescription('Stop playback, clear the queue, and (optionally) leave the voice channel')
-        .addBooleanOption(o => o.setName('leave')
-        .setDescription('Also disconnect the bot from voice (default: true)')
-        .setRequired(false));
+        .setDescription('Stop playback and clear the queue');
     async execute({ interaction }) {
-        await interaction.deferReply();
-        if (!interaction.inGuild()) {
-            await interaction.editReply('Use this in a server.');
+        if (!interaction.guildId) {
+            await interaction.reply({ content: 'Use this in a server.', ephemeral: true });
             return;
         }
-        const member = await interaction.guild.members.fetch(interaction.user.id);
-        if (!member.voice.channel) {
-            await interaction.editReply('Join a voice channel first.');
-            return;
+        // Clear queue & stop audio
+        player.stop(interaction.guildId);
+        // Optional: disconnect the voice connection (safe no-op if none)
+        const session = player.sessions?.get(interaction.guildId);
+        try {
+            session?.connection?.destroy?.();
         }
-        const leave = interaction.options.getBoolean('leave') ?? true;
-        const res = player.stop(interaction.guild.id, { disconnect: leave });
-        if (res.action === 'stopped') {
-            if (leave)
-                await interaction.editReply('⏹️ Stopped playback, cleared the queue, and left the voice channel.');
-            else
-                await interaction.editReply('⏹️ Stopped playback and cleared the queue.');
-        }
-        else {
-            await interaction.editReply('Nothing to stop.');
-        }
+        catch { }
+        await interaction.reply('⏹️ Stopped and cleared the queue.');
     }
 }

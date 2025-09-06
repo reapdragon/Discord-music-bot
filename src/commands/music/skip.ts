@@ -8,26 +8,20 @@ export default class Skip extends Command {
     .setDescription('Skip the current track');
 
   async execute({ interaction }: CommandContext): Promise<void> {
-    await interaction.deferReply();
-
-    if (!interaction.inGuild()) {
-      await interaction.editReply('Use this in a server.');
+    if (!interaction.guildId) {
+      await interaction.reply({ content: 'Use this in a server.', ephemeral: true });
       return;
     }
 
-    const member = await interaction.guild!.members.fetch(interaction.user.id);
-    if (!member.voice.channel) {
-      await interaction.editReply('Join a voice channel first.');
-      return;
-    }
+    // Peek at what will play next for a nicer message
+    const session = (player as any).sessions?.get(interaction.guildId);
+    const upcoming = session?.queue?.peek?.();
 
-    const res = player.skip(interaction.guild!.id);
-    if (res.action === 'skipped') {
-      await interaction.editReply(`⏭️ Skipped. Now playing: **${res.nextTitle}**`);
-    } else if (res.action === 'stopped') {
-      await interaction.editReply('⏹️ Stopped. No more tracks in the queue.');
-    } else {
-      await interaction.editReply('Nothing to skip.');
-    }
+    player.skip(interaction.guildId);
+
+    const msg = upcoming?.meta?.title
+      ? `⏭️ Skipped. Now playing: **${upcoming.meta.title}**`
+      : '⏭️ Skipped.';
+    await interaction.reply(msg);
   }
 }
