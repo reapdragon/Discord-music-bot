@@ -1,7 +1,7 @@
-# Don’t send heavy/irrelevant stuff to the build context
 node_modules
 dist
 .git
 .gitignore
 npm-debug.log
 *.log
+.DS_Store

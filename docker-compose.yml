@@ -1,16 +1,16 @@
-name: projectfishy
 services:
   bot:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: projectfishy-bot
+    build: .
+    container_name: discord-music-bot
+    restart: unless-stopped
     env_file:
       - .env
-    # Map the optional health/metrics web port (can remove if unused)
+    environment:
+      - YTDL_NO_UPDATE=1
+    # if your bot exposes a tiny HTTP server on 8889 for health/logs:
     ports:
       - "8889:8889"
-    # Persist cookies.txt (if using YTDL_COOKIES) and any future cache
-    volumes:
-      - ./data:/data
-    restart: unless-stopped
+    # Optional: mount source for quick iteration inside container (commented out for prod)
+    # volumes:
+    #   - ./:/app
+    #   - /app/node_modules
