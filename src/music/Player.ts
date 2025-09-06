@@ -17,7 +17,7 @@ import type { GuildMember, VoiceBasedChannel } from 'discord.js';
 import * as playdl from 'play-dl';
 import ytdl from '@distube/ytdl-core';
 
-import { Queue } from './Queue.js';
+import { Queue as TrackQueue } from './Queue.js';   // 👈 alias to avoid any collisions
 import type { Track } from './Track.js';
 
 const UA =
@@ -25,7 +25,7 @@ const UA =
 
 type GuildSession = {
   player: AudioPlayer;
-  queue: Queue;
+  queue: TrackQueue;                                 // 👈 use the aliased type
   connection: VoiceConnection | null;
   current: Track | null;
 };
@@ -38,7 +38,7 @@ export class Player {
     const existing = this.sessions.get(guildId);
     if (existing) return existing;
 
-    const queue = new Queue();
+    const queue = new TrackQueue();                  // 👈 ensure the right class
     const player = createAudioPlayer({
       behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
     });
@@ -99,7 +99,9 @@ export class Player {
       this.starting.has(guildId);
 
     s.queue.enqueue(track);
-    const queuedPos = Math.max(0, s.queue.length - 1);
+
+    // 🔧 Use the exposed list for length — always exists
+    const queuedPos = Math.max(0, s.queue.tracks.length - 1);
 
     if (!isBusy) {
       const first = s.queue.dequeue()!;
