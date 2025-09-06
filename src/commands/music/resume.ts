@@ -1,6 +1,7 @@
 import { SlashCommandBuilder } from 'discord.js';
 import { Command, CommandContext } from '../../core/Command.js';
 import { player } from '../../music/Player.js';
+import { safeDefer, safeRespond } from '../utils/interaction.js';
 
 export default class Resume extends Command {
   public data = new SlashCommandBuilder()
@@ -8,17 +9,15 @@ export default class Resume extends Command {
     .setDescription('Resume playback');
 
   async execute({ interaction }: CommandContext): Promise<void> {
-    const guildId = interaction.guildId;
-    if (!guildId) {
-      await interaction.reply({ content: 'This command must be used in a server.', ephemeral: true });
-      return;
-    }
-    const session = (player as any).sessions?.get(guildId);
-    if (!session) {
-      await interaction.reply('Nothing to resume.');
-      return;
-    }
-    const ok = session.player.unpause();
-    await interaction.reply(ok ? '▶️ Resumed.' : 'Already playing.');
+    const st = await safeDefer(interaction, { ephemeral: false });
+    if (st === 'unknown') return;
+
+    const gid = interaction.guildId;
+    if (!gid) { await safeRespond(interaction, 'Use this in a server.'); return; }
+    const s = (player as any).sessions?.get(gid);
+    if (!s) { await safeRespond(interaction, 'Nothing to resume.'); return; }
+
+    s.player.unpause();
+    await safeRespond(interaction, '▶️ Resumed.', { ephemeral: false });
   }
 }

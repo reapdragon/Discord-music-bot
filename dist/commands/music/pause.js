@@ -1,22 +1,26 @@
 import { SlashCommandBuilder } from 'discord.js';
 import { Command } from '../../core/Command.js';
 import { player } from '../../music/Player.js';
+import { safeDefer, safeRespond } from '../utils/interaction.js';
 export default class Pause extends Command {
     data = new SlashCommandBuilder()
         .setName('pause')
-        .setDescription('Pause the current track');
+        .setDescription('Pause playback');
     async execute({ interaction }) {
-        const guildId = interaction.guildId;
-        if (!guildId) {
-            await interaction.reply({ content: 'This command must be used in a server.', ephemeral: true });
+        const st = await safeDefer(interaction, { ephemeral: false });
+        if (st === 'unknown')
+            return;
+        const gid = interaction.guildId;
+        if (!gid) {
+            await safeRespond(interaction, 'Use this in a server.');
             return;
         }
-        const session = player.sessions?.get(guildId);
-        if (!session) {
-            await interaction.reply('Nothing is playing.');
+        const s = player.sessions?.get(gid);
+        if (!s) {
+            await safeRespond(interaction, 'Nothing playing.');
             return;
         }
-        const ok = session.player.pause();
-        await interaction.reply(ok ? '⏸️ Paused.' : 'Already paused.');
+        s.player.pause();
+        await safeRespond(interaction, '⏸️ Paused.', { ephemeral: false });
     }
 }

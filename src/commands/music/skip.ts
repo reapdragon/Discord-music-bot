@@ -1,33 +1,21 @@
 import { SlashCommandBuilder } from 'discord.js';
 import { Command, CommandContext } from '../../core/Command.js';
 import { player } from '../../music/Player.js';
-import { safeDefer } from '../utils/safeReply.js';
+import { safeDefer, safeRespond } from '../utils/interaction.js';
 
 export default class Skip extends Command {
   public data = new SlashCommandBuilder()
     .setName('skip')
-    .setDescription('Skip the current track');
+    .setDescription('Skip the current song');
 
   async execute({ interaction }: CommandContext): Promise<void> {
-    await safeDefer(interaction);
+    const st = await safeDefer(interaction, { ephemeral: false });
+    if (st === 'unknown') return;
 
-    const guildId = interaction.guild?.id;
-    if (!guildId) {
-      await interaction.editReply('Use this in a server.');
-      return;
-    }
+    const gid = interaction.guildId;
+    if (!gid) { await safeRespond(interaction, 'Use this in a server.'); return; }
 
-    try {
-      player.skip(guildId);
-      // Try to show what’s now playing (if already swapped in by the Player).
-      const s: any = (player as any).sessions?.get(guildId);
-      const nextTitle: string | undefined = s?.current?.meta?.title;
-      await interaction.editReply(
-        nextTitle ? `⏭️ Skipped. Now playing **${nextTitle}**.` : '⏭️ Skipped.'
-      );
-    } catch (e) {
-      console.error('[skip] failed:', e);
-      await interaction.editReply('Failed to skip.');
-    }
+    player.skip(gid);
+    await safeRespond(interaction, '⏭️ Skipped.', { ephemeral: false });
   }
 }

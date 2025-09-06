@@ -1,7 +1,8 @@
+// src/music/Player.ts
 import { AudioPlayerStatus, NoSubscriberBehavior, VoiceConnectionStatus, createAudioPlayer, createAudioResource, demuxProbe, entersState, joinVoiceChannel, StreamType, } from '@discordjs/voice';
 import * as playdl from 'play-dl';
 import ytdl from '@distube/ytdl-core';
-import { Queue as TrackQueue } from './Queue.js'; // 👈 alias to avoid any collisions
+import { Queue } from './Queue.js';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
 export class Player {
     sessions = new Map();
@@ -10,7 +11,7 @@ export class Player {
         const existing = this.sessions.get(guildId);
         if (existing)
             return existing;
-        const queue = new TrackQueue(); // 👈 ensure the right class
+        const queue = new Queue();
         const player = createAudioPlayer({
             behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
         });
@@ -59,8 +60,7 @@ export class Player {
             !!s.current ||
             this.starting.has(guildId);
         s.queue.enqueue(track);
-        // 🔧 Use the exposed list for length — always exists
-        const queuedPos = Math.max(0, s.queue.tracks.length - 1);
+        const queuedPos = Math.max(0, s.queue.length - 1);
         if (!isBusy) {
             const first = s.queue.dequeue();
             s.current = first;
@@ -105,42 +105,70 @@ export class Player {
         s.current = null;
         s.player.stop(true);
     }
+    /**
+     * Ensure we have a ready voice connection.
+     * Joins (or re-joins) if missing/disconnected or in the wrong channel.
+     * Narrowing is done via a local `conn` variable to satisfy TS.
+     */
     async ensureConnected(member, channel) {
-        const gid = (channel ?? member.voice.channel)?.guild.id;
-        if (!gid)
+        const vc = channel ?? member.voice.channel;
+        if (!vc)
             throw new Error('Join a voice channel first.');
-        const s = this.sessions.get(gid);
-        if (!s || !s.connection)
-            await this.connect(member, channel);
+        const s = this.getOrCreateSession(vc.guild.id);
+        const needJoin = !s.connection ||
+            s.connection.state.status === VoiceConnectionStatus.Destroyed ||
+            s.connection.state.status === VoiceConnectionStatus.Disconnected ||
+            s.connection.joinConfig.channelId !== vc.id;
+        if (needJoin) {
+            await this.connect(member, vc);
+            return;
+        }
+        // Work with a non-null local for TS
+        const conn = s.connection;
+        if (conn.state.status !== VoiceConnectionStatus.Ready) {
+            await entersState(conn, VoiceConnectionStatus.Ready, 20_000);
+        }
+        conn.subscribe(s.player);
     }
     async buildResource(url) {
-        // try play-dl first
+        // Attempt play-dl first
         try {
             const pl = await playdl.stream(url);
             const { stream: probed, type } = await demuxProbe(pl.stream);
             const resource = createAudioResource(probed, { inputType: type });
-            const cleanup = () => { try {
-                pl.stream?.destroy?.();
-            }
-            catch { } };
+            const cleanup = () => {
+                try {
+                    pl.stream?.destroy?.();
+                }
+                catch { }
+            };
             return { resource, cleanup };
         }
         catch (e) {
             console.warn('[player] play-dl failed, falling back to ytdl:', e?.message ?? e);
         }
-        // fallback ytdl
+        // Fallback to ytdl
         const ystream = ytdl(url, {
             filter: 'audioonly',
             quality: 'highestaudio',
             highWaterMark: 1 << 25,
-            requestOptions: { headers: { 'user-agent': UA, 'accept-language': 'en-US,en;q=0.9' } },
+            requestOptions: {
+                headers: {
+                    'user-agent': UA,
+                    'accept-language': 'en-US,en;q=0.9',
+                },
+            },
         });
         const { stream: probed, type } = await demuxProbe(ystream);
-        const resource = createAudioResource(probed, { inputType: type ?? StreamType.Arbitrary });
-        const cleanup = () => { try {
-            ystream?.destroy?.();
-        }
-        catch { } };
+        const resource = createAudioResource(probed, {
+            inputType: type ?? StreamType.Arbitrary,
+        });
+        const cleanup = () => {
+            try {
+                ystream?.destroy?.();
+            }
+            catch { }
+        };
         return { resource, cleanup };
     }
 }

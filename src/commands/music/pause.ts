@@ -1,7 +1,7 @@
 import { SlashCommandBuilder } from 'discord.js';
 import { Command, CommandContext } from '../../core/Command.js';
 import { player } from '../../music/Player.js';
-import { safeDefer } from '../utils/safeReply.js';
+import { safeDefer, safeRespond } from '../utils/interaction.js';
 
 export default class Pause extends Command {
   public data = new SlashCommandBuilder()
@@ -9,27 +9,15 @@ export default class Pause extends Command {
     .setDescription('Pause playback');
 
   async execute({ interaction }: CommandContext): Promise<void> {
-    await safeDefer(interaction);
+    const st = await safeDefer(interaction, { ephemeral: false });
+    if (st === 'unknown') return;
 
-    const guildId = interaction.guild?.id;
-    if (!guildId) {
-      await interaction.editReply('Use this in a server.');
-      return;
-    }
+    const gid = interaction.guildId;
+    if (!gid) { await safeRespond(interaction, 'Use this in a server.'); return; }
+    const s = (player as any).sessions?.get(gid);
+    if (!s) { await safeRespond(interaction, 'Nothing playing.'); return; }
 
-    try {
-      // Prefer your Player API if present
-      if (typeof (player as any).pause === 'function') {
-        await (player as any).pause(guildId);
-      } else {
-        const s: any = (player as any).sessions?.get(guildId);
-        if (!s?.player) throw new Error('Nothing playing.');
-        s.player.pause(true);
-      }
-      await interaction.editReply('⏸️ Paused.');
-    } catch (e) {
-      console.error('[pause] failed:', e);
-      await interaction.editReply('Failed to pause.');
-    }
+    s.player.pause();
+    await safeRespond(interaction, '⏸️ Paused.', { ephemeral: false });
   }
 }

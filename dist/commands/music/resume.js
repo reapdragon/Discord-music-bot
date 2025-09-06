@@ -1,22 +1,26 @@
 import { SlashCommandBuilder } from 'discord.js';
 import { Command } from '../../core/Command.js';
 import { player } from '../../music/Player.js';
+import { safeDefer, safeRespond } from '../utils/interaction.js';
 export default class Resume extends Command {
     data = new SlashCommandBuilder()
         .setName('resume')
         .setDescription('Resume playback');
     async execute({ interaction }) {
-        const guildId = interaction.guildId;
-        if (!guildId) {
-            await interaction.reply({ content: 'This command must be used in a server.', ephemeral: true });
+        const st = await safeDefer(interaction, { ephemeral: false });
+        if (st === 'unknown')
+            return;
+        const gid = interaction.guildId;
+        if (!gid) {
+            await safeRespond(interaction, 'Use this in a server.');
             return;
         }
-        const session = player.sessions?.get(guildId);
-        if (!session) {
-            await interaction.reply('Nothing to resume.');
+        const s = player.sessions?.get(gid);
+        if (!s) {
+            await safeRespond(interaction, 'Nothing to resume.');
             return;
         }
-        const ok = session.player.unpause();
-        await interaction.reply(ok ? '▶️ Resumed.' : 'Already playing.');
+        s.player.unpause();
+        await safeRespond(interaction, '▶️ Resumed.', { ephemeral: false });
     }
 }

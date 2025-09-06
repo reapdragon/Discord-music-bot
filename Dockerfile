@@ -1,39 +1,27 @@
-# --- base runtime image ---
-FROM node:20-bookworm-slim AS base
+# --- deps
+FROM node:20-bookworm-slim AS deps
 WORKDIR /app
-
-# --- deps: install build toolchain & deps (dev deps included) ---
-FROM base AS deps
-# toolchain for native modules (opus/tweetnacl, etc.)
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 make g++ pkg-config git \
+ && apt-get install -y --no-install-recommends python3 make g++ pkg-config \
  && rm -rf /var/lib/apt/lists/*
 COPY package*.json tsconfig.json ./
 RUN npm ci
 
-# --- build: compile TS to dist ---
+# --- build
 FROM deps AS build
-# bring in sources
-COPY src ./src
-# build and ensure dist exists
-RUN npm run build \
- && ls -la dist \
- && test -f dist/index.js
-
-# strip dev deps from node_modules AFTER building
-RUN npm prune --omit=dev
-
-# --- prod: minimal runtime image ---
-FROM node:20-bookworm-slim AS prod
-ENV NODE_ENV=production \
-    YTDL_NO_UPDATE=1 \
-    PORT=8889
 WORKDIR /app
+COPY src ./src
+RUN npm run build && npm prune --omit=dev
+# sanity
+RUN ls -la dist && test -f dist/index.js
 
-# copy production node_modules and compiled JS
+# --- prod
+FROM node:20-bookworm-slim AS prod
+WORKDIR /app
+ENV NODE_ENV=production
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package*.json ./
-
+COPY docker/entrypoint.sh /entrypoint.sh
 EXPOSE 8889
-CMD ["node", "dist/index.js"]
+ENTRYPOINT ["/entrypoint.sh"]
