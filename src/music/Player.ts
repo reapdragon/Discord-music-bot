@@ -6,333 +6,180 @@ import {
   VoiceConnectionStatus,
   createAudioPlayer,
   createAudioResource,
+  demuxProbe,
   entersState,
   joinVoiceChannel,
-  demuxProbe,
   StreamType,
-  type AudioResource,
   type DiscordGatewayAdapterCreator,
 } from '@discordjs/voice';
 import type { GuildMember, VoiceBasedChannel } from 'discord.js';
-import { Readable } from 'node:stream';
+
+import * as playdl from 'play-dl';
 import ytdl from '@distube/ytdl-core';
-import { Track } from './Track.js';
+
 import { Queue } from './Queue.js';
+import type { Track } from './Track.js';
+
+const UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
 
 type GuildSession = {
   player: AudioPlayer;
   queue: Queue;
   connection: VoiceConnection | null;
   current: Track | null;
-  suppressIdleOnce: boolean;
-  cleanupCurrent?: () => void;
-  currentRetries: number;         // how many retries we’ve done for this current track
 };
-
-type BuiltResource = { resource: AudioResource; cleanup: () => void };
-type WebmPick = { type: 'webm/opus' | 'unknown'; stream: Readable };
-
-const UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
 
 export class Player {
   private sessions = new Map<string, GuildSession>();
+  private starting = new Set<string>();
 
   private getOrCreateSession(guildId: string): GuildSession {
-    let s = this.sessions.get(guildId);
-    if (s) return s;
+    const existing = this.sessions.get(guildId);
+    if (existing) return existing;
 
     const queue = new Queue();
     const player = createAudioPlayer({
       behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
     });
 
-    player.on('stateChange', (oldS, newS) => {
-      console.log(`[audio] ${guildId}: ${oldS.status} -> ${newS.status}`);
-    });
-
-    // Robust error recovery: retry current track once or twice on network-y errors
-    player.on('error', (e: any) => {
-      console.error(`[audio:error] ${guildId}`, e);
-      const sess = this.sessions.get(guildId);
-      if (!sess) return;
-
-      const shouldRetry =
-        this.isRecoverableStreamError(e) && sess.current && sess.currentRetries < 2;
-
-      if (shouldRetry) {
-        sess.currentRetries += 1;
-        console.warn(
-          `[player] recoverable error — retrying current (attempt ${sess.currentRetries}/2)`
-        );
-        sess.suppressIdleOnce = true;  // ignore the idle that follows stop()
-        try { sess.cleanupCurrent?.(); } catch {}
-        sess.cleanupCurrent = undefined;
-        // Stop the current player frame and restart same track from the top
-        try { sess.player.stop(true); } catch {}
-        this.playNow(guildId, sess.current!).catch(err => console.error('[playNow:retry:error]', err));
-        return;
-      }
-
-      // No retry left or non-recoverable: go to next track
-      const next = sess.queue.dequeue();
-      if (next) {
-        sess.suppressIdleOnce = true;
-        try { sess.cleanupCurrent?.(); } catch {}
-        sess.cleanupCurrent = undefined;
-        sess.current = next;
-        this.playNow(guildId, next).catch((err) => console.error('[playNow:error]', err));
-      } else {
-        sess.current = null;
-        try { sess.player.stop(true); } catch {}
-      }
-    });
-
     player.on(AudioPlayerStatus.Idle, () => {
-      const sess = this.sessions.get(guildId);
-      if (!sess) return;
-      if (sess.suppressIdleOnce) { sess.suppressIdleOnce = false; return; }
-      const next = sess.queue.dequeue();
+      const s = this.sessions.get(guildId);
+      if (!s) return;
+      const next = s.queue.dequeue();
+      s.current = next ?? null;
       if (next) {
-        console.log('[player] idle -> next:', next.meta.title);
-        sess.current = next;
-        sess.currentRetries = 0;
-        this.playNow(guildId, next).catch((e) => console.error('[playNow:error]', e));
-      } else {
-        console.log('[player] idle -> queue empty');
-        sess.current = null;
+        this.play(guildId, next).catch((e) =>
+          console.error('[player] auto-next failed:', e)
+        );
       }
     });
 
-    s = {
-      player,
-      queue,
-      connection: null,
-      current: null,
-      suppressIdleOnce: false,
-      currentRetries: 0,
-    };
-    this.sessions.set(guildId, s);
-    return s;
-  }
+    player.on('error', (e) => console.error('[audio:error]', guildId, e));
 
-  private attachConnDebug(conn: VoiceConnection, guildId: string): void {
-    conn.on('stateChange', (o, n) => {
-      console.log(`[voice] ${guildId}: ${o.status} -> ${n.status}`);
-    });
+    const session: GuildSession = { player, queue, connection: null, current: null };
+    this.sessions.set(guildId, session);
+    return session;
   }
 
   async connect(member: GuildMember, channel?: VoiceBasedChannel): Promise<VoiceConnection> {
     const vc = channel ?? member.voice.channel;
     if (!vc) throw new Error('Join a voice channel first.');
 
-    const session = this.getOrCreateSession(vc.guild.id);
-    console.log('[player] joinVoiceChannel ->', vc.name);
+    const s = this.getOrCreateSession(vc.guild.id);
 
     const conn = joinVoiceChannel({
       channelId: vc.id,
       guildId: vc.guild.id,
       adapterCreator: vc.guild.voiceAdapterCreator as unknown as DiscordGatewayAdapterCreator,
+      selfDeaf: true,
     });
 
-    this.attachConnDebug(conn, vc.guild.id);
+    conn.on('stateChange', (oldS, newS) => {
+      console.log(`[voice] ${vc.guild.id}: ${oldS.status} -> ${newS.status}`);
+    });
 
-    console.log('[player] waiting for Voice Ready…');
-    try {
-      await entersState(conn, VoiceConnectionStatus.Ready, 20_000);
-      console.log('[player] voice Ready');
-    } catch (e) {
-      try { conn.destroy(); } catch {}
-      const err = new Error('VOICE_CONNECT_TIMEOUT_UDP');
-      (err as any).cause = e;
-      throw err;
-    }
-
-    session.connection = conn;
-    conn.subscribe(session.player);
-    console.log('[player] subscribed player to connection');
+    await entersState(conn, VoiceConnectionStatus.Ready, 20_000);
+    s.connection = conn;
+    conn.subscribe(s.player);
     return conn;
   }
 
+  /**
+   * Enqueue a track. If idle, start immediately.
+   * Returns whether playback started and the 0-based queue position (if queued).
+   */
+  enqueue(guildId: string, track: Track): { started: boolean; position: number } {
+    const s = this.getOrCreateSession(guildId);
+
+    const isBusy =
+      s.player.state.status === AudioPlayerStatus.Playing ||
+      s.player.state.status === AudioPlayerStatus.Buffering ||
+      !!s.current ||
+      this.starting.has(guildId);
+
+    s.queue.enqueue(track);
+    const queuedPos = Math.max(0, s.queue.length - 1);
+
+    if (!isBusy) {
+      const first = s.queue.dequeue()!;
+      s.current = first;
+      this.starting.add(guildId);
+      this.play(guildId, first)
+        .catch((e) => console.error('[player] auto-start failed:', e))
+        .finally(() => this.starting.delete(guildId));
+      return { started: true, position: 0 };
+    }
+
+    return { started: false, position: queuedPos };
+  }
+
+  /** Play a specific track now (connection must already exist). */
+  async play(guildId: string, track: Track): Promise<void> {
+    const s = this.getOrCreateSession(guildId);
+    if (!s.connection) throw new Error('Not connected to a voice channel.');
+
+    const { resource, cleanup } = await this.buildResource(track.meta.url);
+    s.player.play(resource);
+    s.current = track;
+
+    const once = () => {
+      try { cleanup?.(); } catch {}
+      s.player.off(AudioPlayerStatus.Idle, once);
+      s.player.off('error', once as any);
+    };
+    s.player.once(AudioPlayerStatus.Idle, once);
+    s.player.once('error', once as any);
+  }
+
+  skip(guildId: string): void {
+    const s = this.sessions.get(guildId);
+    if (!s) return;
+    s.player.stop(true);
+  }
+
+  stop(guildId: string): void {
+    const s = this.sessions.get(guildId);
+    if (!s) return;
+    s.queue.clear();
+    s.current = null;
+    s.player.stop(true);
+  }
+
   async ensureConnected(member: GuildMember, channel?: VoiceBasedChannel): Promise<void> {
-    const vc = channel ?? member.voice.channel;
-    if (!vc) throw new Error('Join a voice channel first.');
-    const s = this.sessions.get(vc.guild.id);
+    const gid = (channel ?? member.voice.channel)?.guild.id;
+    if (!gid) throw new Error('Join a voice channel first.');
+    const s = this.sessions.get(gid);
     if (!s || !s.connection) await this.connect(member, channel);
   }
 
-  enqueue(guildId: string, track: Track): { started: boolean; position: number } {
-    const s = this.getOrCreateSession(guildId);
-    const busy =
-      s.player.state.status === AudioPlayerStatus.Playing ||
-      s.player.state.status === AudioPlayerStatus.Buffering ||
-      !!s.current;
-
-    if (busy) {
-      s.queue.enqueue(track);
-      console.log('[queue] +', track.meta.title, '(pos', s.queue.tracks.length, ')');
-      return { started: false, position: s.queue.tracks.length };
+  private async buildResource(url: string): Promise<{
+    resource: ReturnType<typeof createAudioResource>;
+    cleanup: () => void;
+  }> {
+    // try play-dl first
+    try {
+      const pl = await playdl.stream(url);
+      const { stream: probed, type } = await demuxProbe(pl.stream);
+      const resource = createAudioResource(probed, { inputType: type });
+      const cleanup = () => { try { (pl.stream as any)?.destroy?.(); } catch {} };
+      return { resource, cleanup };
+    } catch (e) {
+      console.warn('[player] play-dl failed, falling back to ytdl:', (e as Error)?.message ?? e);
     }
 
-    s.current = track;
-    s.currentRetries = 0;
-    this.playNow(guildId, track).catch((e) => console.error('[playNow:error]', e));
-    return { started: true, position: 0 };
-  }
-
-  skip(guildId: string): { action: 'skipped' | 'stopped' | 'noop'; nextTitle?: string } {
-    const s = this.sessions.get(guildId);
-    if (!s) return { action: 'noop' };
-
-    const next = s.queue.dequeue();
-    if (next) {
-      s.suppressIdleOnce = true;
-      try { s.cleanupCurrent?.(); } catch {}
-      s.cleanupCurrent = undefined;
-      s.current = next;
-      s.currentRetries = 0;
-      try { s.player.stop(true); } catch {}
-      this.playNow(guildId, next).catch((e) => console.error('[playNow:error]', e));
-      return { action: 'skipped', nextTitle: next.meta.title };
-    } else {
-      s.suppressIdleOnce = true;
-      try { s.cleanupCurrent?.(); } catch {}
-      s.cleanupCurrent = undefined;
-      s.current = null;
-      try { s.player.stop(true); } catch {}
-      return { action: 'stopped' };
-    }
-  }
-
-  stop(guildId: string, opts: { disconnect?: boolean } = {}): { action: 'stopped' | 'noop' } {
-    const s = this.sessions.get(guildId);
-    if (!s) return { action: 'noop' };
-
-    s.queue.clear();
-    s.suppressIdleOnce = true;
-    try { s.cleanupCurrent?.(); } catch {}
-    s.cleanupCurrent = undefined;
-    s.current = null;
-    s.currentRetries = 0;
-    try { s.player.stop(true); } catch {}
-
-    if (opts.disconnect !== false && s.connection) {
-      try { s.connection.destroy(); } catch {}
-      s.connection = null;
-    }
-    return { action: 'stopped' };
-  }
-
-  // ---------- Stream building (no ffmpeg) ----------
-
-  private async getWebmOpusStream(url: string): Promise<WebmPick> {
-    const info: any = await ytdl.getInfo(url, {
-      requestOptions: { headers: { 'user-agent': UA, 'accept-language': 'en-US,en;q=0.9' } },
-    });
-
-    const opus = info.formats
-      .filter((f: any) => (f.mimeType || '').includes('audio/webm') && (f.codecs || '').includes('opus'))
-      .sort((a: any, b: any) => (b.audioBitrate || 0) - (a.audioBitrate || 0));
-
-    if (opus[0]) {
-      console.log('[ytdl] chosen itag', opus[0].itag, opus[0].mimeType, opus[0].audioBitrate, 'kbps');
-      const stream = ytdl.downloadFromInfo(info, {
-        format: opus[0],
-        highWaterMark: 1 << 25,
-        dlChunkSize: 0,
-        requestOptions: { headers: { 'user-agent': UA, 'accept-language': 'en-US,en;q=0.9' } },
-      }) as unknown as Readable;
-      return { type: 'webm/opus', stream };
-    }
-
-    console.log('[ytdl] no opus/webm format; falling back to audioonly');
-    const stream = ytdl(url, {
+    // fallback ytdl
+    const ystream = ytdl(url, {
       filter: 'audioonly',
       quality: 'highestaudio',
       highWaterMark: 1 << 25,
       requestOptions: { headers: { 'user-agent': UA, 'accept-language': 'en-US,en;q=0.9' } },
-    }) as unknown as Readable;
-    return { type: 'unknown', stream };
+    });
+    const { stream: probed, type } = await demuxProbe(ystream);
+    const resource = createAudioResource(probed, { inputType: type ?? StreamType.Arbitrary });
+    const cleanup = () => { try { (ystream as any)?.destroy?.(); } catch {} };
+    return { resource, cleanup };
   }
-
-  private async buildResource(url: string, attempt = 1): Promise<BuiltResource> {
-    try {
-      const got = await this.getWebmOpusStream(url);
-      if (got.type === 'webm/opus') {
-        const resource = createAudioResource(got.stream, { inputType: StreamType.WebmOpus });
-        const cleanup = () => { try { (got.stream as any).destroy?.(); } catch {} };
-        return { resource, cleanup };
-      } else {
-        const { stream: probed, type } = await demuxProbe(got.stream);
-        const resource = createAudioResource(probed, { inputType: type });
-        const cleanup = () => { try { (probed as any).destroy?.(); } catch {} };
-        return { resource, cleanup };
-      }
-    } catch (e: any) {
-      const sc: number = e?.statusCode ?? e?.status ?? 0;
-      if ((sc === 429 || sc === 503) && attempt < 3) {
-        const ms = 1000 * attempt;
-        console.warn(`[ytdl] ${sc} building resource — retrying in ${ms}ms (attempt ${attempt + 1}/3)`);
-        await new Promise((r) => setTimeout(r, ms));
-        return this.buildResource(url, attempt + 1);
-      }
-      throw e;
-    }
-  }
-
-  private async playNow(guildId: string, track: Track): Promise<void> {
-    const s = this.getOrCreateSession(guildId);
-    if (!s.connection) throw new Error('Not connected to a voice channel.');
-
-    console.log('[playNow] starting:', track.meta.title, track.meta.url);
-    s.currentRetries = 0; // reset on new start
-
-    try {
-      const { resource, cleanup } = await this.buildResource(track.meta.url);
-      s.cleanupCurrent = cleanup;
-      s.player.play(resource);
-
-      // Safety guard: if not "playing" within 6s, assume failure and try next
-      setTimeout(() => {
-        if (s.player.state.status !== AudioPlayerStatus.Playing) {
-          console.warn('[playNow] not playing after 6s — attempting next track');
-          const next = s.queue.dequeue();
-          if (next) {
-            s.current = next;
-            s.currentRetries = 0;
-            this.playNow(guildId, next).catch((err) => console.error('[playNow:next:error]', err));
-          }
-        }
-      }, 6000);
-    } catch (e) {
-      console.error('[playNow:error]', e);
-      const next = s.queue.dequeue();
-      if (next) {
-        s.current = next;
-        s.currentRetries = 0;
-        this.playNow(guildId, next).catch((err) => console.error('[playNow:next:error]', err));
-      } else {
-        s.current = null;
-      }
-    }
-  }
-
-  private isRecoverableStreamError(e: any): boolean {
-    const msg = String(e?.message ?? '').toLowerCase();
-    const code = (e?.code ?? '').toString().toUpperCase();
-    const sc = e?.statusCode ?? e?.status ?? 0;
-    return (
-      msg.includes('aborted') ||
-      code === 'ECONNRESET' ||
-      code === 'ETIMEDOUT' ||
-      sc === 429 ||
-      sc === 503
-    );
-  }
-
-  getSession(guildId: string): GuildSession | null {
-    return this.sessions.get(guildId) ?? null;
-    }
 }
 
 export const player = new Player();
