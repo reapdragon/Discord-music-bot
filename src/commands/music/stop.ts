@@ -1,25 +1,19 @@
-import { SlashCommandBuilder } from 'discord.js';
+import { SlashCommandBuilder, MessageFlags } from 'discord.js';
 import { Command, CommandContext } from '../../core/Command.js';
 import { player } from '../../music/Player.js';
 
-export default class Stop extends Command {
+export default class StopCmd extends Command {
   public data = new SlashCommandBuilder()
     .setName('stop')
-    .setDescription('Stop playback and clear the queue');
+    .setDescription('Stop playback, clear the queue, and leave the voice channel');
 
   async execute({ interaction }: CommandContext): Promise<void> {
-    if (!interaction.guildId) {
-      await interaction.reply({ content: 'Use this in a server.', ephemeral: true });
+    const guildId = interaction.guildId;
+    if (!guildId) {
+      await interaction.reply({ content: 'Use this in a server.', flags: MessageFlags.Ephemeral });
       return;
     }
-
-    // Clear queue & stop audio
-    player.stop(interaction.guildId);
-
-    // Optional: disconnect the voice connection (safe no-op if none)
-    const session = (player as any).sessions?.get(interaction.guildId);
-    try { session?.connection?.destroy?.(); } catch {}
-
-    await interaction.reply('⏹️ Stopped and cleared the queue.');
+    player.leave(guildId);
+    await interaction.reply('⏹️ Stopped and cleared the queue. Left the voice channel.');
   }
 }
