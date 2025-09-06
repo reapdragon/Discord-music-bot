@@ -1,16 +1,20 @@
 services:
   bot:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: discord-music-bot:latest
     container_name: discord-music-bot
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
-      - YTDL_NO_UPDATE=1
-    # if your bot exposes a tiny HTTP server on 8889 for health/logs:
+      # REQUIRED
+      DISCORD_TOKEN: ${DISCORD_TOKEN}
+      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID}
+      # OPTIONAL (if you use them)
+      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY}
+      SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID}
+      SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET}
+      # If you end up using cookies later:
+      # YT_COOKIE: ${YT_COOKIE}
     ports:
       - "8889:8889"
-    # Optional: mount source for quick iteration inside container (commented out for prod)
-    # volumes:
-    #   - ./:/app
-    #   - /app/node_modules
