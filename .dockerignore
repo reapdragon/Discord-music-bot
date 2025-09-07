@@ -1,8 +1,7 @@
+# keep the context tiny; we build inside the container
 .git
-.gitignore
 node_modules
 dist
-Dockerfile
-docker-compose.yml
 *.log
 .env
+.DS_Store
