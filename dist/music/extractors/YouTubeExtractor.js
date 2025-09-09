@@ -2,6 +2,15 @@ import ytdl from '@distube/ytdl-core';
 import yts from 'yt-search';
 import ytpl from 'ytpl';
 import { BaseExtractor } from './BaseExtractor.js';
+// Configure ytdl with cookie if available
+const cookie = process.env.YOUTUBE_COOKIE?.trim();
+if (cookie) {
+    console.log('[yt] YouTube cookie configured');
+    // ytdl will automatically use the cookie from environment
+}
+else {
+    console.log('[yt] No YouTube cookie set - may encounter bot detection');
+}
 /** host helpers */
 function isYouTubeHost(host) {
     return /(^|\.)youtube\.com$/i.test(host)
@@ -52,17 +61,21 @@ export class YouTubeExtractor extends BaseExtractor {
             if (hostOk && listId && ytpl.validateID(listId)) {
                 // Try ytpl first
                 try {
+                    const requestOptions = {
+                        headers: {
+                            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                            'accept-language': 'en-US,en;q=0.9',
+                            referer: 'https://www.youtube.com/',
+                        },
+                    };
+                    if (cookie) {
+                        requestOptions.headers.cookie = cookie;
+                    }
                     const playlist = await ytpl(listId, {
                         limit: 500,
                         hl: 'en',
                         gl: 'US',
-                        requestOptions: {
-                            headers: {
-                                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-                                'accept-language': 'en-US,en;q=0.9',
-                                referer: 'https://www.youtube.com/',
-                            },
-                        },
+                        requestOptions,
                     });
                     const out = [];
                     for (const raw of playlist.items) {
@@ -148,7 +161,16 @@ export class YouTubeExtractor extends BaseExtractor {
         }
         // ========== SINGLE VIDEO URL ==========
         if (isLink && ytdl.validateURL(query)) {
-            const info = await ytdl.getBasicInfo(query);
+            const options = {};
+            if (cookie) {
+                options.requestOptions = {
+                    headers: {
+                        'cookie': cookie,
+                        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+                    }
+                };
+            }
+            const info = await ytdl.getBasicInfo(query, options);
             const v = info.videoDetails;
             const thumb = last(v.thumbnails)?.url;
             return [
@@ -163,7 +185,16 @@ export class YouTubeExtractor extends BaseExtractor {
             ];
         }
         // ========== KEYWORD SEARCH (first result) ==========
-        const res = await yts(query);
+        const searchOptions = {};
+        if (cookie) {
+            searchOptions.requestOptions = {
+                headers: {
+                    'cookie': cookie,
+                    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+                }
+            };
+        }
+        const res = await yts({ query, ...searchOptions });
         const first = res.videos?.[0];
         if (!first)
             return [];

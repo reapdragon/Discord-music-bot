@@ -205,16 +205,23 @@ export class Player {
   }> {
     // Try ytdl first (more reliable)
     try {
+      const cookie = process.env.YOUTUBE_COOKIE?.trim();
+      const requestOptions: any = {
+        headers: {
+          'user-agent': UA,
+          'accept-language': 'en-US,en;q=0.9',
+        },
+      };
+      
+      if (cookie) {
+        requestOptions.headers.cookie = cookie;
+      }
+      
       const ystream = ytdl(url, {
         filter: 'audioonly',
         quality: 'highestaudio',
         highWaterMark: 1 << 25,
-        requestOptions: {
-          headers: {
-            'user-agent': UA,
-            'accept-language': 'en-US,en;q=0.9',
-          },
-        },
+        requestOptions,
       });
       const { stream: probed, type } = await demuxProbe(ystream);
       const resource = createAudioResource(probed, {
