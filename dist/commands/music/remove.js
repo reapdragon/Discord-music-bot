@@ -1,34 +1,35 @@
 import { SlashCommandBuilder } from 'discord.js';
 import { Command } from '../../core/Command.js';
 import { player } from '../../music/Player.js';
-import { safeDefer } from '../utils/safeReply.js';
-export default class Resume extends Command {
+import { safeDefer, safeRespond } from '../utils/interaction.js';
+export default class Remove extends Command {
     data = new SlashCommandBuilder()
-        .setName('resume')
-        .setDescription('Resume playback');
+        .setName('remove')
+        .setDescription('Remove a track from the queue')
+        .addIntegerOption(option => option.setName('position')
+        .setDescription('Position of the track to remove (1-based)')
+        .setRequired(true)
+        .setMinValue(1));
     async execute({ interaction }) {
-        await safeDefer(interaction);
-        const guildId = interaction.guild?.id;
-        if (!guildId) {
-            await interaction.editReply('Use this in a server.');
+        const st = await safeDefer(interaction, { ephemeral: false });
+        if (st === 'unknown')
+            return;
+        const gid = interaction.guildId;
+        if (!gid) {
+            await safeRespond(interaction, 'Use this in a server.');
             return;
         }
-        try {
-            // Prefer your Player API if present
-            if (typeof player.resume === 'function') {
-                await player.resume(guildId);
-            }
-            else {
-                const s = player.sessions?.get(guildId);
-                if (!s?.player)
-                    throw new Error('Nothing to resume.');
-                s.player.unpause();
-            }
-            await interaction.editReply('▶️ Resumed.');
+        const position = interaction.options.getInteger('position', true) - 1; // Convert to 0-based
+        const session = player.sessions?.get(gid);
+        if (!session || !session.queue) {
+            await safeRespond(interaction, 'No queue found.', { ephemeral: false });
+            return;
         }
-        catch (e) {
-            console.error('[resume] failed:', e);
-            await interaction.editReply('Failed to resume.');
+        const removed = session.queue.removeAt(position);
+        if (!removed) {
+            await safeRespond(interaction, 'Invalid position. Check the queue with `/queue`.', { ephemeral: false });
+            return;
         }
+        await safeRespond(interaction, `🗑️ Removed **${removed.meta.title}** from the queue.`, { ephemeral: false });
     }
 }

@@ -149,6 +149,25 @@ export class Player {
     s.player.stop(true);
   }
 
+  disconnect(guildId: string): void {
+    const s = this.sessions.get(guildId);
+    if (!s) return;
+    
+    // Stop playback and clear queue
+    s.queue.clear();
+    s.current = null;
+    s.player.stop(true);
+    
+    // Disconnect from voice channel
+    if (s.connection) {
+      s.connection.destroy();
+      s.connection = null;
+    }
+    
+    // Remove the session
+    this.sessions.delete(guildId);
+  }
+
   /**
    * Ensure we have a ready voice connection.
    * Joins (or re-joins) if missing/disconnected or in the wrong channel.
@@ -184,7 +203,34 @@ export class Player {
     resource: ReturnType<typeof createAudioResource>;
     cleanup: () => void;
   }> {
-    // Attempt play-dl first
+    // Try ytdl first (more reliable)
+    try {
+      const ystream = ytdl(url, {
+        filter: 'audioonly',
+        quality: 'highestaudio',
+        highWaterMark: 1 << 25,
+        requestOptions: {
+          headers: {
+            'user-agent': UA,
+            'accept-language': 'en-US,en;q=0.9',
+          },
+        },
+      });
+      const { stream: probed, type } = await demuxProbe(ystream);
+      const resource = createAudioResource(probed, {
+        inputType: type ?? StreamType.Arbitrary,
+      });
+      const cleanup = () => {
+        try {
+          (ystream as any)?.destroy?.();
+        } catch {}
+      };
+      return { resource, cleanup };
+    } catch (e) {
+      console.warn('[player] ytdl failed, falling back to play-dl:', (e as Error)?.message ?? e);
+    }
+
+    // Fallback to play-dl
     try {
       const pl = await playdl.stream(url);
       const { stream: probed, type } = await demuxProbe(pl.stream);
@@ -196,34 +242,9 @@ export class Player {
       };
       return { resource, cleanup };
     } catch (e) {
-      console.warn(
-        '[player] play-dl failed, falling back to ytdl:',
-        (e as Error)?.message ?? e
-      );
+      console.error('[player] Both ytdl and play-dl failed:', (e as Error)?.message ?? e);
+      throw new Error(`Failed to stream audio: ${(e as Error)?.message ?? 'Unknown error'}`);
     }
-
-    // Fallback to ytdl
-    const ystream = ytdl(url, {
-      filter: 'audioonly',
-      quality: 'highestaudio',
-      highWaterMark: 1 << 25,
-      requestOptions: {
-        headers: {
-          'user-agent': UA,
-          'accept-language': 'en-US,en;q=0.9',
-        },
-      },
-    });
-    const { stream: probed, type } = await demuxProbe(ystream);
-    const resource = createAudioResource(probed, {
-      inputType: type ?? StreamType.Arbitrary,
-    });
-    const cleanup = () => {
-      try {
-        (ystream as any)?.destroy?.();
-      } catch {}
-    };
-    return { resource, cleanup };
   }
 }
 

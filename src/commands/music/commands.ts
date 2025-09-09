@@ -1,19 +1,26 @@
-import { SlashCommandBuilder } from 'discord.js';
+import { EmbedBuilder, SlashCommandBuilder } from 'discord.js';
 import { Command, CommandContext } from '../../core/Command.js';
-import { player } from '../../music/Player.js';
-import { interceptors } from 'undici';
+import { safeDefer, safeRespond } from '../utils/interaction.js';
 
-export default class Pause extends Command {
+export default class Commands extends Command {
   public data = new SlashCommandBuilder()
     .setName('commands')
-    .setDescription('List of commands');
+    .setDescription('List all available commands');
 
   async execute({ interaction }: CommandContext): Promise<void> {
-    const guildId = interaction.guildId;
-    if (!guildId) {
-      await interaction.reply({ content: 'This command must be used in a server.', ephemeral: true });
-      return;
-    }
-    interaction.reply( {content:'play (Query) \n join \n pause \n queue \n remove \n shuffle \n skip \n stop \n'})
+    const st = await safeDefer(interaction, { ephemeral: false });
+    if (st === 'unknown') return;
+
+    const embed = new EmbedBuilder()
+      .setTitle('🎵 Music Bot Commands')
+      .setDescription('Here are all the available commands:')
+      .addFields(
+        { name: '🎵 Music Commands', value: '`/play` - Play a song from YouTube or Spotify\n`/join` - Join your voice channel\n`/pause` - Pause playback\n`/resume` - Resume playback\n`/skip` - Skip current song\n`/stop` - Stop playback, clear queue, and leave voice channel\n`/queue` - Show current queue\n`/nowplaying` - Show currently playing song\n`/shuffle` - Shuffle the queue\n`/remove` - Remove a track from queue', inline: false },
+        { name: '🔧 Utility Commands', value: '`/ping` - Health check\n`/commands` - Show this help', inline: false }
+      )
+      .setColor(0x5865F2)
+      .setFooter({ text: 'Use / before each command name' });
+
+    await interaction.editReply({ embeds: [embed] });
   }
 }

@@ -1,4 +1,3 @@
-import ytdl from '@distube/ytdl-core';
 import yts from 'yt-search';
 import ytpl from 'ytpl';
 import { BaseExtractor } from './BaseExtractor.js';
@@ -147,20 +146,27 @@ export class YouTubeExtractor extends BaseExtractor {
             }
         }
         // ========== SINGLE VIDEO URL ==========
-        if (isLink && ytdl.validateURL(query)) {
-            const info = await ytdl.getBasicInfo(query);
-            const v = info.videoDetails;
-            const thumb = last(v.thumbnails)?.url;
-            return [
-                {
-                    title: v.title,
-                    url: v.video_url,
-                    durationMs: Number(v.lengthSeconds) * 1000,
-                    author: v.author?.name,
-                    thumbnail: thumb,
-                    source: 'YOUTUBE',
-                },
-            ];
+        if (isLink) {
+            // For single video URLs, use yt-search to get metadata
+            try {
+                const res = await yts(query);
+                const first = res.videos?.[0];
+                if (first) {
+                    return [
+                        {
+                            title: first.title,
+                            url: first.url,
+                            durationMs: first.seconds ? first.seconds * 1000 : undefined,
+                            author: first.author?.name,
+                            thumbnail: first.thumbnail,
+                            source: 'YOUTUBE',
+                        },
+                    ];
+                }
+            }
+            catch (e) {
+                console.warn('[ytx] Failed to resolve single video URL:', e);
+            }
         }
         // ========== KEYWORD SEARCH (first result) ==========
         const res = await yts(query);

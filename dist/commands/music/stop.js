@@ -5,7 +5,7 @@ import { safeDefer, safeRespond } from '../utils/interaction.js';
 export default class StopCmd extends Command {
     data = new SlashCommandBuilder()
         .setName('stop')
-        .setDescription('Stop and clear the queue');
+        .setDescription('Stop playback, clear queue, and leave voice channel');
     async execute({ interaction }) {
         const st = await safeDefer(interaction, { ephemeral: false });
         if (st === 'unknown')
@@ -15,7 +15,7 @@ export default class StopCmd extends Command {
             await safeRespond(interaction, 'Use this in a server.');
             return;
         }
-        player.stop(gid);
-        await safeRespond(interaction, '⏹️ Stopped and cleared the queue.', { ephemeral: false });
+        player.disconnect(gid);
+        await safeRespond(interaction, '⏹️ Stopped playback, cleared queue, and left voice channel.', { ephemeral: false });
     }
 }

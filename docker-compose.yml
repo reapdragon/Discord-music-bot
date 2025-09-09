@@ -6,14 +6,6 @@ services:
     image: discord-music-bot:latest
     container_name: discord-music-bot
     restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      DISCORD_TOKEN: ${DISCORD_TOKEN}
-      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID}
-      YT_COOKIE: ${YT_COOKIE}
-      SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID}
-      SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET}
-      PORT: ${PORT:-8889}
+    env_file: .env   # put your secrets in a .env file in this folder
     ports:
       - "8889:8889"
