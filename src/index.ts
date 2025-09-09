@@ -31,7 +31,6 @@ console.log('[boot] env:',
   'DISCORD_CLIENT_ID=' + (process.env.DISCORD_CLIENT_ID ?? '<unset>'),
   'SPOTIFY_CLIENT_ID=' + (process.env.SPOTIFY_CLIENT_ID ?? '<unset>'),
   'SPOTIFY_CLIENT_SECRET=' + flag(process.env.SPOTIFY_CLIENT_SECRET),
-  'YT_COOKIE=' + flag(process.env.YT_COOKIE),
 );
 
 if (!process.env.DISCORD_TOKEN) {
@@ -194,9 +193,6 @@ client.on('interactionCreate', async (interaction: Interaction) => {
   await loadCommands();
 
   // Optional hints about third-party deps:
-  if (!process.env.YT_COOKIE) {
-    console.warn('[yt] No YOUTUBE_COOKIE set — YouTube may block requests with “confirm you’re not a bot”.');
-  }
   if (process.env.SPOTIFY_CLIENT_ID && process.env.SPOTIFY_CLIENT_SECRET) {
     console.log('[spotify] tokens set.');
   } else {
